@@ -445,3 +445,65 @@ class TestVariableLiterals:
         result = engine.from_string("{{ -1 }}").render({})
         expected = stock.from_string("{{ -1 }}").render({})
         assert result == expected
+
+
+# =========================================================================
+# Phase 9: Monkey-patched lexer detection
+# =========================================================================
+
+
+class TestLexerMonkeyPatchDetection:
+    def test_patched_lexer_is_detected(self, _engines):
+        from django.template.base import Lexer
+        from django_template_oxide._rust import Template as OxideTemplate
+
+        original = Lexer.tokenize
+        call_count = {"n": 0}
+
+        def patched_tokenize(self):
+            call_count["n"] += 1
+            return original(self)
+
+        Lexer.tokenize = patched_tokenize
+        try:
+            OxideTemplate(
+                "hello {{ name }}",
+                engine=_engines["oxide"].engine,
+            )
+            assert call_count["n"] >= 1, (
+                "Patched Lexer.tokenize was not called. Oxide must use the "
+                "Python lexer when Lexer.tokenize is monkey-patched."
+            )
+        finally:
+            Lexer.tokenize = original
+
+    def test_stock_lexer_uses_rust(self, _engines):
+        from django_template_oxide._rust import Template as OxideTemplate
+
+        tpl = OxideTemplate("hello {{ name }}")
+        assert tpl.render({"name": "world"}) == "hello world"
+
+    def test_cotton_style_patch_detected(self, _engines):
+        from django.template.base import Lexer
+        from django_template_oxide._rust import Template as OxideTemplate
+
+        original = Lexer.tokenize
+        marker = {"called": False}
+
+        def cotton_tokenize(self):
+            marker["called"] = True
+            return original(self)
+
+        cotton_tokenize.__qualname__ = "fake_cotton_tokenize"
+        Lexer.tokenize = cotton_tokenize
+        try:
+            OxideTemplate(
+                "{{ x }}",
+                engine=_engines["oxide"].engine,
+            )
+            assert marker["called"], (
+                "Cotton-style patch not detected. Oxide must fall back to "
+                "the Python lexer when __qualname__ != 'Lexer.tokenize'."
+            )
+        finally:
+            Lexer.tokenize = original
