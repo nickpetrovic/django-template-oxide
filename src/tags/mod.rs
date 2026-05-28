@@ -1456,25 +1456,38 @@ impl Node for WidthRatioNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         let val = resolve_if_value(py, &self.val_expr, context);
         let max_val = resolve_if_value(py, &self.max_expr, context);
-        let max_width = resolve_if_value(py, &self.max_width, context);
+        let max_width_val = resolve_if_value(py, &self.max_width, context);
 
-        let val_f = value_to_f64(&val);
-        let max_f = value_to_f64(&max_val);
-        let width_f = value_to_f64(&max_width);
+        let max_width = match try_to_int(&max_width_val) {
+            Some(w) => w,
+            None => {
+                return Err(TemplateError::TemplateSyntaxError(
+                    "widthratio final argument must be a number".into(),
+                ));
+            }
+        };
+
+        let val_f = match try_to_f64(&val) {
+            Some(f) => f,
+            None => return self.store_or_return("", context),
+        };
+        let max_f = match try_to_f64(&max_val) {
+            Some(f) => f,
+            None => return self.store_or_return("", context),
+        };
 
         let result = if max_f == 0.0 {
             "0".to_owned()
         } else {
-            let ratio = val_f / max_f * width_f;
-            format!("{}", ratio.round() as i64)
+            let ratio = val_f / max_f * max_width as f64;
+            if ratio.is_nan() || ratio.is_infinite() {
+                String::new()
+            } else {
+                format!("{}", python_round(ratio))
+            }
         };
 
-        if let Some(ref asvar) = self.asvar {
-            context.set(asvar.clone(), Value::String(result));
-            Ok(String::new())
-        } else {
-            Ok(result)
-        }
+        self.store_or_return(&result, context)
     }
 
     impl_node_metadata!();
@@ -1484,17 +1497,55 @@ impl Node for WidthRatioNode {
     }
 }
 
-/// Convert a `Value` to f64, matching Django's `float()` coercion.
-fn value_to_f64(value: &Value) -> f64 {
-    match value {
-        Value::Int(n) => *n as f64,
-        Value::Float(f) => *f,
-        Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
-        Value::SafeString(s) => s.parse::<f64>().unwrap_or(0.0),
-        Value::Bool(true) => 1.0,
-        Value::Bool(false) => 0.0,
-        _ => 0.0,
+impl WidthRatioNode {
+    fn store_or_return(&self, val: &str, context: &mut Context) -> Result<String, TemplateError> {
+        if let Some(ref asvar) = self.asvar {
+            context.set(asvar.clone(), Value::String(val.to_owned()));
+            Ok(String::new())
+        } else {
+            Ok(val.to_owned())
+        }
     }
+}
+
+fn try_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int(n) => Some(*n as f64),
+        Value::Float(f) => Some(*f),
+        Value::String(s) => s.parse::<f64>().ok(),
+        Value::SafeString(s) => s.parse::<f64>().ok(),
+        Value::Bool(true) => Some(1.0),
+        Value::Bool(false) => Some(0.0),
+        Value::None => None,
+        _ => None,
+    }
+}
+
+fn try_to_int(value: &Value) -> Option<i64> {
+    match value {
+        Value::Int(n) => Some(*n),
+        Value::Float(f) => Some(*f as i64),
+        Value::String(s) => s.parse::<i64>().ok(),
+        Value::SafeString(s) => s.parse::<i64>().ok(),
+        Value::Bool(true) => Some(1),
+        Value::Bool(false) => Some(0),
+        _ => None,
+    }
+}
+
+fn python_round(x: f64) -> i64 {
+    let r = x.round();
+    let ri = r as i64;
+    if (x.fract().abs() - 0.5).abs() < 1e-9 && ri % 2 != 0 {
+        ri - x.signum() as i64
+    } else {
+        ri
+    }
+}
+
+#[allow(dead_code)]
+fn value_to_f64(value: &Value) -> f64 {
+    try_to_f64(value).unwrap_or(0.0)
 }
 
 pub fn compile_widthratio(
