@@ -81,6 +81,7 @@ def _patch_template_render():
             engine=engine,
             name=getattr(self, "name", None),
         )
+
         flat = context.flatten()
 
         request = getattr(context, "request", None)

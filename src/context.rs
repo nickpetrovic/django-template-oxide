@@ -673,6 +673,11 @@ pub struct Context {
     /// template) naturally get a fresh slot via PyTemplate.render
     /// building a new Context.
     pub block_context: Option<crate::tags::loader_tags::BlockContext>,
+    /// The Django `Engine` instance that owns this rendering session.
+    /// Used by `{% extends %}` and `{% include %}` to load templates
+    /// through the Engine's loader chain (locmem, filesystem, cached,
+    /// etc.) instead of the global `django.template.loader`.
+    pub engine: Option<Py<PyAny>>,
 }
 
 /// Per-iteration cache populated by ForNode when its body has a
@@ -702,6 +707,7 @@ impl Context {
             string_if_invalid: String::new(),
             loop_batch_cache: None,
             block_context: None,
+            engine: None,
         }
     }
 
@@ -786,6 +792,7 @@ impl Context {
             string_if_invalid: self.string_if_invalid.clone(),
             loop_batch_cache: None,
             block_context: None,
+            engine: self.engine.clone(),
         }
     }
 

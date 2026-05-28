@@ -790,6 +790,10 @@ impl PyTemplate {
             rust_context.string_if_invalid = this.inner.string_if_invalid.clone();
         }
 
+        if rust_context.engine.is_none() {
+            rust_context.engine = this.engine_value.clone();
+        }
+
         // Bind `self` to `context.template` for the duration of the
         // render - mirrors Django's `Template.render` which wraps the
         // nodelist call in `with context.bind_template(self):`. Many

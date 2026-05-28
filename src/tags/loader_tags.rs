@@ -79,11 +79,13 @@ fn get_or_create_block_context(context: &mut Context) -> &mut BlockContext {
 }
 
 thread_local! {
-    /// Compiled-nodelist cache keyed by template name. `Arc<NodeList>`
-    /// because NodeList isn't Clone (contains `Box<dyn Node>`).
     static TEMPLATE_CACHE: std::cell::RefCell<HashMap<String, Arc<NodeList>>> =
         std::cell::RefCell::new(HashMap::new());
+
+    static EXTENDS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
+
+const MAX_EXTENDS_DEPTH: u32 = 64;
 
 /// Load + compile + cache via `django.template.loader.get_template`.
 /// Errors: `TemplateDoesNotExist` (not found), `TemplateSyntaxError`
@@ -91,29 +93,27 @@ thread_local! {
 fn load_template_nodelist(
     py: Python<'_>,
     template_name: &str,
+    context: &Context,
 ) -> Result<Arc<NodeList>, TemplateError> {
     let cached = TEMPLATE_CACHE.with_borrow(|cache| cache.get(template_name).cloned());
     if let Some(nodelist) = cached {
         return Ok(nodelist);
     }
 
-    // Engine is needed for `template_builtins` (cotton, debug_toolbar
-    // etc.); bare `compile_nodelist` would miss them.
-    let (source, engine) = load_template_source_and_engine(py, template_name)?;
-
+    let (source, engine) = load_template_source_and_engine(py, template_name, context)?;
     let engine_bound = engine.as_ref().map(|e| e.bind(py));
     let nodelist = Template::compile_nodelist_with_engine(
         &source,
         Some(template_name),
         false,
-        engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+        engine_bound
+            .as_ref()
+            .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
     )?;
     let rc = Arc::new(nodelist);
-
     TEMPLATE_CACHE.with_borrow_mut(|cache| {
         cache.insert(template_name.to_owned(), Arc::clone(&rc));
     });
-
     Ok(rc)
 }
 
@@ -131,23 +131,14 @@ fn load_template_nodelist(
 fn load_template_source_and_engine<'py>(
     py: Python<'py>,
     template_name: &str,
+    context: &Context,
 ) -> Result<(String, Option<pyo3::Py<pyo3::PyAny>>), TemplateError> {
-    let loader = py
-        .import("django.template.loader")
-        .map_err(|e| TemplateError::Internal(format!("Failed to import django.template.loader: {e}")))?;
-
-    let get_template = loader
-        .getattr("get_template")
-        .map_err(|e| TemplateError::Internal(format!("Failed to get get_template: {e}")))?;
-
-    let django_template = get_template.call1((template_name,)).map_err(|e| {
-        // Check if this is a TemplateDoesNotExist exception.
+    let map_tdne = |e: pyo3::PyErr| -> TemplateError {
         let is_tdne = py
             .import("django.template.exceptions")
             .and_then(|m| m.getattr("TemplateDoesNotExist"))
             .map(|cls| e.is_instance(py, &cls))
             .unwrap_or(false);
-
         if is_tdne {
             TemplateError::TemplateDoesNotExist {
                 msg: template_name.to_owned(),
@@ -155,39 +146,64 @@ fn load_template_source_and_engine<'py>(
                 chain: vec![],
             }
         } else {
-            TemplateError::Internal(format!("Failed to load template '{}': {}", template_name, e))
+            TemplateError::Internal(format!(
+                "Failed to load template '{}': {}",
+                template_name, e
+            ))
         }
-    })?;
+    };
 
-    // Navigate to .template.source.
+    if let Some(ref engine_py) = context.engine {
+        let engine_bound = engine_py.bind(py);
+        let result = engine_bound
+            .call_method1("find_template", (template_name,))
+            .map_err(map_tdne)?;
+        let django_template = result.get_item(0).map_err(|e| {
+            TemplateError::Internal(format!(
+                "find_template('{}') did not return a (template, origin) tuple: {}",
+                template_name, e
+            ))
+        })?;
+        let source: String = django_template
+            .getattr("source")
+            .and_then(|s| s.extract())
+            .map_err(|e| {
+                TemplateError::Internal(format!(
+                    "Template '{}' has no .source: {}",
+                    template_name, e
+                ))
+            })?;
+        return Ok((source, Some(engine_py.clone())));
+    }
+
+    let loader = py.import("django.template.loader").map_err(|e| {
+        TemplateError::Internal(format!(
+            "Failed to import django.template.loader: {e}"
+        ))
+    })?;
+    let django_template = loader
+        .call_method1("get_template", (template_name,))
+        .map_err(map_tdne)?;
+
     let inner_template = django_template.getattr("template").map_err(|e| {
         TemplateError::Internal(format!(
             "Loaded template '{}' has no .template attribute: {}",
             template_name, e
         ))
     })?;
-
-    let source_obj = inner_template.getattr("source").map_err(|e| {
-        TemplateError::Internal(format!(
-            "Loaded template '{}' has no .template.source attribute: {}",
-            template_name, e
-        ))
-    })?;
-
-    let source: String = source_obj.extract().map_err(|e| {
-        TemplateError::Internal(format!(
-            "Failed to extract source string from template '{}': {}",
-            template_name, e
-        ))
-    })?;
-
-    // `.engine` is best-effort: backend wrappers expose it but stock
-    // `Template` subclasses may not.
+    let source: String = inner_template
+        .getattr("source")
+        .and_then(|s| s.extract())
+        .map_err(|e| {
+            TemplateError::Internal(format!(
+                "Template '{}' has no .source: {}",
+                template_name, e
+            ))
+        })?;
     let engine = django_template
         .getattr("engine")
         .ok()
         .map(|e| e.unbind());
-
     Ok((source, engine))
 }
 
@@ -448,24 +464,18 @@ impl Node for ExtendsNode {
     impl_node_metadata!();
 
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        // 1. Resolve the parent template name.
-        let parent_name = resolve_template_name(&self.parent_name, context)?;
+        let depth = EXTENDS_DEPTH.get();
+        if depth >= MAX_EXTENDS_DEPTH {
+            return Err(TemplateError::TemplateSyntaxError(
+                "Maximum template inheritance depth exceeded.".into(),
+            ));
+        }
+        EXTENDS_DEPTH.set(depth + 1);
 
-        // 2. Load and compile the parent template's nodelist.
-        let parent_nodelist = load_template_nodelist(py, &parent_name)?;
+        let result = self.render_inner(py, context);
 
-        // Child blocks first (most-derived); parent blocks pushed
-        // to queue front. Multi-level inheritance chains via the
-        // parent's own ExtendsNode at render time.
-        let block_context = get_or_create_block_context(context);
-        block_context.add_blocks(&self.blocks);
-
-        let parent_blocks = collect_block_nodes_from_nodelist(&parent_nodelist);
-        let block_context = get_or_create_block_context(context);
-        block_context.add_blocks(&parent_blocks);
-
-        let result = parent_nodelist.render(py, context)?;
-        Ok(result.as_str().to_owned())
+        EXTENDS_DEPTH.set(depth);
+        result
     }
 
     fn must_be_first(&self) -> bool {
@@ -486,6 +496,23 @@ impl Node for ExtendsNode {
 
     fn walk_children(&self, visit: &mut dyn FnMut(&NodeList)) {
         visit(&self.nodelist);
+    }
+}
+
+impl ExtendsNode {
+    fn render_inner(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
+        let parent_name = resolve_template_name(&self.parent_name, context)?;
+        let parent_nodelist = load_template_nodelist(py, &parent_name, context)?;
+
+        let block_context = get_or_create_block_context(context);
+        block_context.add_blocks(&self.blocks);
+
+        let parent_blocks = collect_block_nodes_from_nodelist(&parent_nodelist);
+        let block_context = get_or_create_block_context(context);
+        block_context.add_blocks(&parent_blocks);
+
+        let result = parent_nodelist.render(py, context)?;
+        Ok(result.as_str().to_owned())
     }
 }
 
@@ -522,7 +549,7 @@ impl Node for IncludeNode {
 
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         let template_name = resolve_template_name(&self.template, context)?;
-        let nodelist = load_template_nodelist(py, &template_name)?;
+        let nodelist = load_template_nodelist(py, &template_name, context)?;
 
         let mut extra: HashMap<String, Value> = HashMap::new();
         for (key, expr) in &self.extra_context {
