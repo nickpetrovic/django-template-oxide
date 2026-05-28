@@ -155,21 +155,18 @@ impl Template {
     }
 }
 
-use std::sync::OnceLock;
-
-static STOCK_LEXER_TOKENIZE_ID: OnceLock<isize> = OnceLock::new();
-
 fn needs_python_lexer(
     py: pyo3::Python<'_>,
     _engine: &pyo3::Bound<'_, pyo3::PyAny>,
 ) -> pyo3::PyResult<bool> {
     let base = py.import("django.template.base")?;
     let lexer_cls = base.getattr("Lexer")?;
-    let current_tokenize = lexer_cls.getattr("tokenize")?;
-    let current_id = current_tokenize.as_ptr() as isize;
-
-    let stock_id = *STOCK_LEXER_TOKENIZE_ID.get_or_init(|| current_id);
-    Ok(current_id != stock_id)
+    let tokenize_fn = lexer_cls.getattr("tokenize")?;
+    let qualname: String = tokenize_fn
+        .getattr("__qualname__")
+        .and_then(|v| v.extract())
+        .unwrap_or_default();
+    Ok(qualname != "Lexer.tokenize")
 }
 
 /// Tokenise via Django's (possibly monkey-patched) Lexer/DebugLexer.
