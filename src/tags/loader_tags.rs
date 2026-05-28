@@ -79,9 +79,6 @@ fn get_or_create_block_context(context: &mut Context) -> &mut BlockContext {
 }
 
 thread_local! {
-    static TEMPLATE_CACHE: std::cell::RefCell<HashMap<String, Arc<NodeList>>> =
-        std::cell::RefCell::new(HashMap::new());
-
     static EXTENDS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -95,11 +92,6 @@ fn load_template_nodelist(
     template_name: &str,
     context: &Context,
 ) -> Result<Arc<NodeList>, TemplateError> {
-    let cached = TEMPLATE_CACHE.with_borrow(|cache| cache.get(template_name).cloned());
-    if let Some(nodelist) = cached {
-        return Ok(nodelist);
-    }
-
     let (base_name, partial_name) = match template_name.split_once('#') {
         Some((base, partial)) => (base, Some(partial)),
         None => (template_name, None),
@@ -116,22 +108,17 @@ fn load_template_nodelist(
             .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
     )?;
 
-    let rc = if let Some(pname) = partial_name {
+    if let Some(pname) = partial_name {
         extract_partial_arc(&nodelist, pname).ok_or_else(|| {
             TemplateError::TemplateDoesNotExist {
                 msg: template_name.to_owned(),
                 tried: vec![],
                 chain: vec![],
             }
-        })?
+        })
     } else {
-        Arc::new(nodelist)
-    };
-
-    TEMPLATE_CACHE.with_borrow_mut(|cache| {
-        cache.insert(template_name.to_owned(), Arc::clone(&rc));
-    });
-    Ok(rc)
+        Ok(Arc::new(nodelist))
+    }
 }
 
 fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>> {
