@@ -263,6 +263,26 @@ class TestCSRFToken:
         tpl = engine.from_string("{% csrf_token %}")
         assert tpl.render({"csrf_token": False}) == ""
 
+    def test_lazy_token_from_middleware(self, engine, rf, _engines):
+        from django.middleware.csrf import CsrfViewMiddleware, get_token
+
+        request = rf.get("/")
+        CsrfViewMiddleware(lambda r: None).process_request(request)
+        token = get_token(request)
+        tpl = engine.from_string("{% csrf_token %}")
+        result = tpl.render({"csrf_token": token}, request)
+        assert "csrfmiddlewaretoken" in result
+        assert 'value="' in result
+        assert len(result) > 50
+
+    def test_pyobject_token_renders(self, engine, _engines):
+        from django.utils.functional import lazy
+
+        lazy_str = lazy(lambda: "test-token-value", str)
+        tpl = engine.from_string("{% csrf_token %}")
+        result = tpl.render({"csrf_token": lazy_str()})
+        assert 'value="test-token-value"' in result
+
 
 # =========================================================================
 # Phase 5: Comment tag completeness
