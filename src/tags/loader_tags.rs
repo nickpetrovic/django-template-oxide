@@ -1082,31 +1082,27 @@ impl Node for IncludeNode {
         }
 
         let saved_block_context = context.block_context.take();
-        let saved_extends_key = context.render_context.get("extends_context").cloned();
 
-        let result = if self.isolated_context {
+        let render_result = if self.isolated_context {
             let mut isolated = Context::new(Some(extra));
             isolated.autoescape = context.autoescape;
             isolated.use_l10n = context.use_l10n;
             isolated.use_tz = context.use_tz;
             isolated.string_if_invalid = context.string_if_invalid.clone();
             isolated.engine = context.engine.clone();
-            nodelist.render(py, &mut isolated)?
+            nodelist.render(py, &mut isolated)
         } else if !extra.is_empty() {
             context.push_with(extra);
-            let r = nodelist.render(py, context)?;
+            let r = nodelist.render(py, context);
             context.pop();
             r
         } else {
-            nodelist.render(py, context)?
+            nodelist.render(py, context)
         };
 
         context.block_context = saved_block_context;
-        if let Some(saved) = saved_extends_key {
-            context.render_context.set("extends_context", saved);
-        }
 
-        Ok(result.as_str().to_owned())
+        Ok(render_result?.as_str().to_owned())
     }
 
     fn child_nodelists(&self) -> &[&str] {
