@@ -141,11 +141,10 @@ fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>>
                 if pdn.name == name {
                     return Some(Arc::clone(&pdn.nodelist));
                 }
+                if let Some(found) = extract_partial_arc(&pdn.nodelist, name) {
+                    return Some(found);
+                }
             }
-            node.walk_children(&mut |child_nl| {
-                // Already found -- skip. walk_children doesn't support
-                // early exit so we just let it run.
-            });
             for child_name in node.child_nodelists() {
                 if let Some(child_nl) = node.get_child_nodelist(child_name) {
                     if let Some(found) = extract_partial_arc(child_nl, name) {

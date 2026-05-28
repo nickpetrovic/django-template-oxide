@@ -400,6 +400,18 @@ impl PyContext {
     fn __len__(&self) -> usize {
         self.inner.base.keys().len()
     }
+
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let list = pyo3::types::PyList::empty(py);
+        for d in self.inner.base.dicts.iter().rev() {
+            let py_dict = PyDict::new(py);
+            for (k, v) in d.iter() {
+                py_dict.set_item(k, v.to_pyobject(py))?;
+            }
+            list.append(py_dict)?;
+        }
+        Ok(list.call_method0("__iter__")?.unbind())
+    }
 }
 
 /// Context-manager from `bind_template`; `__exit__` clears
