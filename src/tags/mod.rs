@@ -1611,15 +1611,31 @@ impl Node for IfChangedNode {
             parts.join("\x01") // separator unlikely to appear in values
         };
 
-        let last_value = context.render_context.get(&self.render_key).cloned();
+        // Django stores ifchanged state in context['forloop'] when inside
+        // a for loop, so it resets on each iteration of the parent loop.
+        // Outside loops, it uses render_context (effectively a no-op since
+        // the state is bound to self).
+        let (last_value, use_forloop) = if let Some(Value::Dict(forloop)) = context.get("forloop") {
+            (forloop.get(&self.render_key).cloned(), true)
+        } else {
+            (context.render_context.get(&self.render_key).cloned(), false)
+        };
+
         let changed = match &last_value {
             Some(Value::String(s)) => s != &current,
             _ => true,
         };
 
-        context
-            .render_context
-            .set(self.render_key.clone(), Value::String(current.clone()));
+        // Store updated state
+        if use_forloop {
+            if let Some(Value::Dict(forloop)) = context.base.get_mut("forloop") {
+                forloop.insert(self.render_key.clone(), Value::String(current.clone()));
+            }
+        } else {
+            context
+                .render_context
+                .set(self.render_key.clone(), Value::String(current.clone()));
+        }
 
         if changed {
             if self.vars.is_empty() {

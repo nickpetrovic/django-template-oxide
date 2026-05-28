@@ -60,14 +60,19 @@ impl Node for TranslateNode {
                         let translation = py.import("django.utils.translation")
                             .map_err(|e| TemplateError::Internal(format!("Cannot import translation: {e}")))?;
 
+                        // Django doubles percent signs before calling gettext
+                        // because PO files store msgids with %% for literal %.
+                        // See Variable.resolve: `msgid = value.replace("%", "%%")`
+                        let msgid = msg.replace('%', "%%");
+
                         let translated = if let Some(ctx_expr) = &self.message_context {
                             let ctx_val = resolve_expr(py, ctx_expr, context);
                             let ctx_str = ctx_val.to_string();
-                            translation.call_method1("pgettext", (ctx_str.as_str(), msg.as_str()))
+                            translation.call_method1("pgettext", (ctx_str.as_str(), msgid.as_str()))
                                 .and_then(|r| r.extract::<String>())
                                 .unwrap_or_else(|_| msg.clone())
                         } else {
-                            translation.call_method1("gettext", (msg.as_str(),))
+                            translation.call_method1("gettext", (msgid.as_str(),))
                                 .and_then(|r| r.extract::<String>())
                                 .unwrap_or_else(|_| msg.clone())
                         };

@@ -67,11 +67,18 @@ def _patch_template_render():
         Context as OxideContext,
     )
 
+    from django_template_oxide._rust import clear_template_cache_py
+
     _original_render = DjangoTemplate._render
+    _last_engine_id = [None]
 
     def _oxide_render(self, context):
-        source = self.source
         engine = getattr(self, "engine", None)
+        eid = id(engine)
+        if eid != _last_engine_id[0]:
+            clear_template_cache_py()
+            _last_engine_id[0] = eid
+        source = self.source
         string_if_invalid = ""
         if engine is not None:
             string_if_invalid = getattr(engine, "string_if_invalid", "")
@@ -95,6 +102,19 @@ def _patch_template_render():
             use_tz=getattr(context, "use_tz", None),
             string_if_invalid=string_if_invalid or None,
         )
-        return oxide_tpl.render(oxide_ctx)
+        result = oxide_tpl.render(oxide_ctx)
+
+        # Propagate context mutations (e.g. {% firstof ... as var %})
+        # back to the Django context. Only propagate NEW keys that
+        # weren't in the original flat dict (avoid numpy ambiguity).
+        try:
+            oxide_flat = oxide_ctx.flatten()
+        except Exception:
+            oxide_flat = {}
+        for key, value in oxide_flat.items():
+            if key not in flat:
+                context[key] = value
+
+        return result
 
     DjangoTemplate._render = _oxide_render

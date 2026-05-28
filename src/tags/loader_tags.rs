@@ -79,6 +79,8 @@ fn get_or_create_block_context(context: &mut Context) -> &mut BlockContext {
 }
 
 thread_local! {
+    static TEMPLATE_CACHE: std::cell::RefCell<HashMap<String, Arc<NodeList>>> =
+        std::cell::RefCell::new(HashMap::new());
     static EXTENDS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -92,6 +94,11 @@ fn load_template_nodelist(
     template_name: &str,
     context: &Context,
 ) -> Result<Arc<NodeList>, TemplateError> {
+    let cached = TEMPLATE_CACHE.with_borrow(|cache| cache.get(template_name).cloned());
+    if let Some(nodelist) = cached {
+        return Ok(nodelist);
+    }
+
     let (base_name, partial_name) = match template_name.split_once('#') {
         Some((base, partial)) => (base, Some(partial)),
         None => (template_name, None),
@@ -108,17 +115,26 @@ fn load_template_nodelist(
             .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
     )?;
 
-    if let Some(pname) = partial_name {
+    let rc = if let Some(pname) = partial_name {
         extract_partial_arc(&nodelist, pname).ok_or_else(|| {
             TemplateError::TemplateDoesNotExist {
                 msg: template_name.to_owned(),
                 tried: vec![],
                 chain: vec![],
             }
-        })
+        })?
     } else {
-        Ok(Arc::new(nodelist))
-    }
+        Arc::new(nodelist)
+    };
+
+    TEMPLATE_CACHE.with_borrow_mut(|cache| {
+        cache.insert(template_name.to_owned(), Arc::clone(&rc));
+    });
+    Ok(rc)
+}
+
+pub fn clear_template_cache() {
+    TEMPLATE_CACHE.with_borrow_mut(|cache| cache.clear());
 }
 
 fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>> {
@@ -254,23 +270,59 @@ fn resolve_template_name(
         )),
         FilterExpressionVar::Var(variable) => {
             let parts: Vec<&str> = variable.var.split('.').collect();
-            let mut current = context.get(parts[0]).cloned().ok_or_else(|| {
-                TemplateError::TemplateSyntaxError(format!(
-                    "Variable '{}' does not exist in context (used as template name)",
-                    variable.var,
-                ))
-            })?;
-
-            for part in &parts[1..] {
-                current = match &current {
-                    Value::Dict(map) => map.get(*part).cloned().unwrap_or(Value::None),
-                    _ => Value::None,
-                };
-            }
+            let current = match context.get(parts[0]) {
+                Some(v) => {
+                    let mut cur = v.clone();
+                    for part in &parts[1..] {
+                        cur = match &cur {
+                            Value::Dict(map) => map.get(*part).cloned().unwrap_or(Value::None),
+                            Value::List(items) => {
+                                if let Ok(idx) = part.parse::<usize>() {
+                                    items.get(idx).cloned().unwrap_or(Value::None)
+                                } else {
+                                    Value::None
+                                }
+                            }
+                            _ => Value::None,
+                        };
+                    }
+                    cur
+                }
+                None => {
+                    // Variable not found: use string_if_invalid behavior
+                    if context.string_if_invalid.is_empty() {
+                        return Err(TemplateError::TemplateSyntaxError(format!(
+                            "Variable '{}' does not exist in context (used as template name)",
+                            variable.var,
+                        )));
+                    } else {
+                        Value::String(context.string_if_invalid.clone())
+                    }
+                }
+            };
 
             match current {
                 Value::String(s) => Ok(s),
                 Value::SafeString(s) => Ok(s.to_string()),
+                Value::None => Err(TemplateError::TemplateSyntaxError(
+                    "Template name resolved to None".to_owned(),
+                )),
+                Value::PyObject(obj) => {
+                    // Try to extract as string first.
+                    Python::attach(|py| {
+                        let bound = obj.bind(py);
+                        if let Ok(s) = bound.extract::<String>() {
+                            return Ok(s);
+                        }
+                        let type_name = bound.get_type().name()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        Err(TemplateError::TemplateSyntaxError(format!(
+                            "Template name must be a string, got: {}",
+                            type_name,
+                        )))
+                    })
+                }
                 other => Err(TemplateError::TemplateSyntaxError(format!(
                     "Template name must be a string, got: {}",
                     other,
@@ -336,11 +388,11 @@ fn collect_block_nodes_from_nodelist(nodelist: &NodeList) -> HashMap<String, Blo
                 },
             );
         }
-        for child_name in node.child_nodelists() {
-            if let Some(child_nl) = node.get_child_nodelist(child_name) {
-                result.extend(collect_block_nodes_from_nodelist(child_nl));
-            }
-        }
+        // Use walk_children to reach all child nodelists, including
+        // IfNode branches and ForNode bodies where blocks might live.
+        node.walk_children(&mut |child_nl: &NodeList| {
+            result.extend(collect_block_nodes_from_nodelist(child_nl));
+        });
     }
     result
 }
@@ -390,6 +442,14 @@ impl Node for BlockNode {
 
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         if context.block_context.is_none() {
+            // No inheritance: check for block.super usage, which is
+            // an error in a base template (matches Django behavior).
+            if nodelist_uses_block_super(&self.nodelist) {
+                return Err(TemplateError::TemplateSyntaxError(
+                    "'BlockNode' object has no attribute 'context'. Did you use \
+                     {{ block.super }} in a base template?".to_owned(),
+                ));
+            }
             // No inheritance: render directly.
             return Ok(self.nodelist.render(py, context)?.as_str().to_owned());
         }
@@ -404,20 +464,10 @@ impl Node for BlockNode {
             },
         };
 
-        // Django exposes `block.super` as a lazy property; we pre-render
-        // it since we can't inject Rust methods into the context.
-        let super_content = {
-            let bc = get_or_create_block_context(context);
-            if bc.get_block(&self.name).is_some() {
-                let parent_ref = bc.pop(&self.name).unwrap();
-                let rendered = parent_ref.nodelist.render(py, context)?;
-                let bc = get_or_create_block_context(context);
-                bc.push(&self.name, parent_ref);
-                rendered.as_str().to_owned()
-            } else {
-                String::new()
-            }
-        };
+        // Recursively compute block.super: render the parent block
+        // with ITS own block.super set up, so multi-level inheritance
+        // chains like grandchild -> child -> parent all work.
+        let super_content = render_block_super(py, context, &self.name)?;
 
         let mut block_dict = indexmap::IndexMap::new();
         block_dict.insert("super".to_string(), Value::SafeString(super_content.into()));
@@ -463,6 +513,44 @@ impl Node for BlockNode {
     fn as_block_node_ref(&self) -> Option<(String, Arc<NodeList>)> {
         Some((self.name.clone(), Arc::clone(&self.nodelist)))
     }
+}
+
+/// Recursively render block.super for a named block. Pops the next
+/// parent block from the block context, sets up ITS block.super via
+/// recursion, renders the parent nodelist with block.super in scope,
+/// then pushes the parent back. Returns the rendered content.
+fn render_block_super(
+    py: Python<'_>,
+    context: &mut Context,
+    block_name: &str,
+) -> Result<String, TemplateError> {
+    let bc = get_or_create_block_context(context);
+    if bc.get_block(block_name).is_none() {
+        return Ok(String::new());
+    }
+    let parent_ref = bc.pop(block_name).unwrap();
+
+    // Recursively get this parent's own block.super
+    let parent_super_content = render_block_super(py, context, block_name)?;
+
+    // Set up block.super for the parent's render
+    let mut block_dict = indexmap::IndexMap::new();
+    block_dict.insert("super".to_string(), Value::SafeString(parent_super_content.into()));
+    context.push_with({
+        let mut m = HashMap::new();
+        m.insert("block".to_owned(), Value::Dict(block_dict));
+        m
+    });
+
+    let rendered = parent_ref.nodelist.render(py, context)?;
+
+    context.pop();
+
+    // Push back for reuse
+    let bc = get_or_create_block_context(context);
+    bc.push(block_name, parent_ref);
+
+    Ok(rendered.as_str().to_owned())
 }
 
 /// `{% extends "parent.html" %}`. Mirrors `ExtendsNode`.
@@ -535,18 +623,208 @@ impl Node for ExtendsNode {
 
 impl ExtendsNode {
     fn render_inner(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let parent_name = resolve_template_name(&self.parent_name, context)?;
-        let parent_nodelist = load_template_nodelist(py, &parent_name, context)?;
+        // Try resolving template name; if it resolves to a Template object,
+        // compile its source directly instead of loading by name.
+        let parent_nodelist = match self.resolve_parent_nodelist(py, context) {
+            Ok(nl) => nl,
+            Err(e) => return Err(e),
+        };
 
         let block_context = get_or_create_block_context(context);
         block_context.add_blocks(&self.blocks);
 
-        let parent_blocks = collect_block_nodes_from_nodelist(&parent_nodelist);
-        let block_context = get_or_create_block_context(context);
-        block_context.add_blocks(&parent_blocks);
+        // Only add parent blocks if the parent is the ROOT template
+        // (has no ExtendsNode). If the parent has its own ExtendsNode,
+        // that node will add blocks during its own render. This
+        // prevents double-adding blocks for intermediate templates.
+        // Mirrors Django's ExtendsNode.render (loader_tags.py).
+        let parent_has_extends = parent_nodelist.iter().any(|node| node.must_be_first());
+        if !parent_has_extends {
+            let parent_blocks = collect_block_nodes_from_nodelist(&parent_nodelist);
+            let block_context = get_or_create_block_context(context);
+            block_context.add_blocks(&parent_blocks);
+        }
 
         let result = parent_nodelist.render(py, context)?;
         Ok(result.as_str().to_owned())
+    }
+
+    /// Resolve the parent template. Handles:
+    /// - String names (load via engine/loader)
+    /// - Django Template objects (compile their source directly)
+    /// - None (error)
+    fn resolve_parent_nodelist(
+        &self,
+        py: Python<'_>,
+        context: &mut Context,
+    ) -> Result<Arc<NodeList>, TemplateError> {
+        // First, try to resolve as a string name
+        match resolve_template_name(&self.parent_name, context) {
+            Ok(name) => {
+                let engine_clone = context.engine.as_ref().map(|e| e.clone_ref(py));
+                if let Some(ref engine_py) = engine_clone {
+                    load_template_with_history(py, &name, engine_py, context)
+                } else {
+                    load_template_nodelist(py, &name, context)
+                }
+            }
+            Err(_) => {
+                // Try resolving as a Template object via full expression resolution
+                let val = super::resolve_if_value(py, &self.parent_name, context);
+                match &val {
+                    Value::PyObject(obj) => {
+                        let bound = obj.bind(py);
+                        // Try .source (base.Template) or .template.source (backends.django.Template)
+                        let source_str = bound.getattr("source")
+                            .and_then(|s| s.extract::<String>())
+                            .or_else(|_| {
+                                bound.getattr("template")
+                                    .and_then(|t| t.getattr("source"))
+                                    .and_then(|s| s.extract::<String>())
+                            });
+
+                        if let Ok(src) = source_str {
+                            let engine_bound = context.engine.as_ref().map(|e| e.bind(py));
+                            let nl = Template::compile_nodelist_with_engine(
+                                &src,
+                                None,
+                                false,
+                                engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+                            )?;
+                            Ok(Arc::new(nl))
+                        } else {
+                            Err(TemplateError::TemplateSyntaxError(format!(
+                                "Template name must be a string or Template, got: {}",
+                                bound.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "unknown".to_string()),
+                            )))
+                        }
+                    }
+                    Value::None => {
+                        Err(TemplateError::TemplateSyntaxError(
+                            "Template name resolved to None".to_owned(),
+                        ))
+                    }
+                    _ => {
+                        Err(TemplateError::TemplateSyntaxError(format!(
+                            "Template name must be a string, got: {}",
+                            val,
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Load a template using Django's `engine.find_template(name, skip=history)`.
+/// Tracks extend history in `context.render_context` to support recursive
+/// extends across multiple loaders (matching Django's ExtendsNode.find_template).
+fn load_template_with_history(
+    py: Python<'_>,
+    template_name: &str,
+    engine_py: &Py<PyAny>,
+    context: &mut Context,
+) -> Result<Arc<NodeList>, TemplateError> {
+    let engine_bound = engine_py.bind(py);
+
+    // Build the skip/history list from render_context
+    let history_key = "__extends_history__".to_owned();
+
+    let history_list = match context.render_context.get(&history_key) {
+        Some(Value::PyObject(obj)) => obj.clone_ref(py),
+        _ => {
+            // First extends: create the history list
+            let list = pyo3::types::PyList::empty(py);
+            let py_obj = list.clone().into_any().unbind();
+            context.render_context.set(history_key.clone(), Value::PyObject(py_obj.clone_ref(py)));
+            py_obj
+        }
+    };
+
+    let history_bound = history_list.bind(py);
+
+    // Call engine.find_template(template_name, skip=history_list)
+    let find_kwargs = pyo3::types::PyDict::new(py);
+    find_kwargs.set_item("skip", history_bound).map_err(|e| {
+        TemplateError::Internal(format!("Failed to set skip: {e}"))
+    })?;
+
+    let find_result = engine_bound
+        .call_method("find_template", (template_name,), Some(&find_kwargs));
+
+    let (django_template, origin) = match find_result {
+        Ok(result) => {
+            // Returns (Template, Origin)
+            let template = result.get_item(0).map_err(|e| {
+                TemplateError::Internal(format!("find_template result error: {e}"))
+            })?;
+            let origin = result.get_item(1).map_err(|e| {
+                TemplateError::Internal(format!("find_template origin error: {e}"))
+            })?;
+            (template, origin)
+        }
+        Err(e) => {
+            // Check if TemplateDoesNotExist
+            let exc_mod = py.import("django.template.exceptions");
+            let is_tdne = exc_mod
+                .as_ref()
+                .ok()
+                .and_then(|m| m.getattr("TemplateDoesNotExist").ok())
+                .map(|cls| e.is_instance(py, &cls))
+                .unwrap_or(false);
+            if is_tdne {
+                return Err(TemplateError::TemplateDoesNotExist {
+                    msg: template_name.to_owned(),
+                    tried: vec![],
+                    chain: vec![],
+                });
+            }
+            return Err(TemplateError::PythonError(e));
+        }
+    };
+
+    // Add origin to history
+    let history_list_ref = history_bound.downcast::<pyo3::types::PyList>().map_err(|_| {
+        TemplateError::Internal("History is not a list".into())
+    })?;
+    history_list_ref.append(&origin).map_err(|e| {
+        TemplateError::Internal(format!("Failed to append to history: {e}"))
+    })?;
+
+    // Get template source and compile
+    let source: String = django_template
+        .getattr("source")
+        .and_then(|s| s.extract())
+        .map_err(|e| {
+            TemplateError::Internal(format!(
+                "Template '{}' has no .source: {}",
+                template_name, e
+            ))
+        })?;
+
+    let (base_name, partial_name) = match template_name.split_once('#') {
+        Some((base, partial)) => (base, Some(partial)),
+        None => (template_name, None),
+    };
+
+    let engine_bound2 = engine_py.bind(py);
+    let nodelist = Template::compile_nodelist_with_engine(
+        &source,
+        Some(base_name),
+        false,
+        Some(engine_bound2),
+    )?;
+
+    if let Some(pname) = partial_name {
+        extract_partial_arc(&nodelist, pname).ok_or_else(|| {
+            TemplateError::TemplateDoesNotExist {
+                msg: template_name.to_owned(),
+                tried: vec![],
+                chain: vec![],
+            }
+        })
+    } else {
+        Ok(Arc::new(nodelist))
     }
 }
 
@@ -582,12 +860,146 @@ impl Node for IncludeNode {
     impl_node_metadata!();
 
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let template_name = resolve_template_name(&self.template, context)?;
-        let nodelist = load_template_nodelist(py, &template_name, context)?;
+        // Resolve the template expression; it could be a string name,
+        // a Django Template object, None, or an iterable of template names.
+        let template_val = super::resolve_if_value(py, &self.template, context);
+
+        let nodelist = match &template_val {
+            Value::String(s) if s.is_empty() => {
+                // Variable not found -> TemplateSyntaxError
+                return Err(TemplateError::TemplateSyntaxError(
+                    "Template name resolved to empty string".to_owned(),
+                ));
+            }
+            Value::String(s) => load_template_nodelist(py, s, context)?,
+            Value::SafeString(s) => load_template_nodelist(py, s.as_ref(), context)?,
+            Value::None => {
+                return Err(TemplateError::TemplateDoesNotExist {
+                    msg: "No template names provided".to_owned(),
+                    tried: vec![],
+                    chain: vec![],
+                });
+            }
+            Value::PyObject(obj) => {
+                let bound = obj.bind(py);
+
+                // Try to get source: directly (.source) or via wrapper (.template.source)
+                let source_str = bound.getattr("source")
+                    .and_then(|s| s.extract::<String>())
+                    .or_else(|_| {
+                        bound.getattr("template")
+                            .and_then(|t| t.getattr("source"))
+                            .and_then(|s| s.extract::<String>())
+                    });
+
+                if let Ok(src) = source_str {
+                    // It's a Django Template object - compile its source
+                    let engine_bound = context.engine.as_ref().map(|e| e.bind(py));
+                    let nl = Template::compile_nodelist_with_engine(
+                        &src,
+                        None,
+                        false,
+                        engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+                    )?;
+                    Arc::new(nl)
+                } else if let Ok(name) = bound.extract::<String>() {
+                    load_template_nodelist(py, &name, context)?
+                } else if bound.is_none() {
+                    return Err(TemplateError::TemplateDoesNotExist {
+                        msg: "No template names provided".to_owned(),
+                        tried: vec![],
+                        chain: vec![],
+                    });
+                } else {
+                    // Try iterating as a list of template names
+                    if let Ok(iter) = bound.try_iter() {
+                        let mut last_err = None;
+                        for item in iter.flatten() {
+                            let name = if let Ok(s) = item.extract::<String>() {
+                                s
+                            } else if let Ok(source) = item.getattr("source") {
+                                if let Ok(src) = source.extract::<String>() {
+                                    let engine_bound = context.engine.as_ref().map(|e| e.bind(py));
+                                    match Template::compile_nodelist_with_engine(
+                                        &src, None, false,
+                                        engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+                                    ) {
+                                        Ok(nl) => {
+                                            last_err = None;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            last_err = Some(e);
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            };
+                            match load_template_nodelist(py, &name, context) {
+                                Ok(nl) => {
+                                    // Found! Use this directly with extra context below
+                                    let mut extra: HashMap<String, Value> = HashMap::new();
+                                    for (key, expr) in &self.extra_context {
+                                        let value = super::resolve_if_value(py, expr, context);
+                                        extra.insert(key.clone(), value);
+                                    }
+                                    if self.isolated_context {
+                                        let mut isolated = Context::new(Some(extra));
+                                        isolated.autoescape = context.autoescape;
+                                        isolated.use_l10n = context.use_l10n;
+                                        isolated.use_tz = context.use_tz;
+                                        isolated.string_if_invalid = context.string_if_invalid.clone();
+                                        isolated.engine = context.engine.clone();
+                                        let result = nl.render(py, &mut isolated)?;
+                                        return Ok(result.as_str().to_owned());
+                                    } else if !extra.is_empty() {
+                                        context.push_with(extra);
+                                        let result = nl.render(py, context)?;
+                                        context.pop();
+                                        return Ok(result.as_str().to_owned());
+                                    } else {
+                                        let result = nl.render(py, context)?;
+                                        return Ok(result.as_str().to_owned());
+                                    }
+                                }
+                                Err(e) => {
+                                    last_err = Some(e);
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(e) = last_err {
+                            return Err(e);
+                        }
+                        return Err(TemplateError::TemplateDoesNotExist {
+                            msg: "No template names provided".to_owned(),
+                            tried: vec![],
+                            chain: vec![],
+                        });
+                    } else {
+                        return Err(TemplateError::TemplateSyntaxError(format!(
+                            "Template name must be a string, got: {}",
+                            bound.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "unknown".to_string()),
+                        )));
+                    }
+                }
+            }
+            other => {
+                return Err(TemplateError::TemplateSyntaxError(format!(
+                    "Template name must be a string, got: {}",
+                    other,
+                )));
+            }
+        };
 
         let mut extra: HashMap<String, Value> = HashMap::new();
         for (key, expr) in &self.extra_context {
-            let value = resolve_filter_expression_to_value(expr, context);
+            // Use the full expression resolver that applies filters
+            let value = super::resolve_if_value(py, expr, context);
             extra.insert(key.clone(), value);
         }
 
@@ -796,13 +1208,39 @@ fn compile_include(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
                 i += 1;
             }
         } else if remaining[0] == "only" {
-            if remaining.len() != 1 {
-                return Err(TemplateError::TemplateSyntaxError(format!(
-                    "'{}' tag received unexpected arguments after 'only'.",
-                    bits[0],
-                )));
-            }
             isolated_context = true;
+            if remaining.len() > 1 {
+                // "only with key=val ..." syntax
+                if remaining[1] == "with" {
+                    let with_args = &remaining[2..];
+                    for arg in with_args {
+                        if let Some(eq_pos) = arg.find('=') {
+                            let key = &arg[..eq_pos];
+                            let value_str = &arg[eq_pos + 1..];
+                            if key.is_empty() || value_str.is_empty() {
+                                return Err(TemplateError::TemplateSyntaxError(format!(
+                                    "'{}' tag's 'with' option received an invalid \
+                                     argument: '{}'.",
+                                    bits[0], arg,
+                                )));
+                            }
+                            let value_expr = parser.compile_filter(value_str)?;
+                            extra_context.push((key.to_owned(), value_expr));
+                        } else {
+                            return Err(TemplateError::TemplateSyntaxError(format!(
+                                "'{}' tag's 'with' option expected an assignment \
+                                 (key=value), got '{}'.",
+                                bits[0], arg,
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(TemplateError::TemplateSyntaxError(format!(
+                        "'{}' tag received unexpected arguments after 'only'.",
+                        bits[0],
+                    )));
+                }
+            }
         } else {
             return Err(TemplateError::TemplateSyntaxError(format!(
                 "'{}' tag received an invalid argument: '{}'.",
@@ -841,6 +1279,20 @@ fn collect_block_nodes(nodelist: &NodeList) -> HashMap<String, BlockNodeRef> {
         }
     }
     result
+}
+
+/// Check if a nodelist contains `{{ block.super }}` references.
+fn nodelist_uses_block_super(nodelist: &NodeList) -> bool {
+    for entry in nodelist.iter_entries() {
+        if let crate::nodes::NodeEntry::Variable(var_node) = entry {
+            if let Some(token) = var_node.token() {
+                if token.contents.contains("block.super") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Extract the block name from a `BlockNode` Debug representation.

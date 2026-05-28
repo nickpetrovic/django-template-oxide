@@ -540,6 +540,20 @@ impl BaseContext {
             .get_mut(key)
     }
 
+    /// Mutable lookup searching all scopes (top-down). Returns a
+    /// mutable reference from the first scope that contains `key`.
+    /// Used by `{% ifchanged %}` to store state in the forloop dict.
+    #[inline]
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        let n = self.dicts.len();
+        for i in (0..n).rev() {
+            if self.dicts[i].contains_key(key) {
+                return self.dicts[i].get_mut(key);
+            }
+        }
+        None
+    }
+
     /// Matches `BaseContext.__contains__`.
     #[inline]
     pub fn contains(&self, key: &str) -> bool {

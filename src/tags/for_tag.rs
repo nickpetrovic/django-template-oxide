@@ -454,24 +454,102 @@ impl ForNode {
             } else {
                 // Tuple unpacking: `Value::List` direct-index, PyObject
                 // via __getitem__, anything else binds None per loopvar.
+                let num_loopvars = self.loopvars.len();
                 match &item {
                     Value::List(sub_items) => {
+                        if sub_items.len() != num_loopvars {
+                            context.pop();
+                            return Err(TemplateError::PythonError(
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "Need {} values to unpack in for loop; got {}.",
+                                    num_loopvars,
+                                    sub_items.len(),
+                                )),
+                            ));
+                        }
                         for (j, var_name) in self.loopvars.iter().enumerate() {
                             let val = sub_items.get(j).cloned().unwrap_or(Value::None);
                             context.set(var_name.clone(), val);
                         }
                     }
-                    Value::PyObject(obj) => {
-                        let bound = obj.bind(py);
+                    Value::String(s) => {
+                        // String unpacking: iterate characters
+                        let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
+                        if chars.len() != num_loopvars {
+                            context.pop();
+                            return Err(TemplateError::PythonError(
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "Need {} values to unpack in for loop; got {}.",
+                                    num_loopvars,
+                                    chars.len(),
+                                )),
+                            ));
+                        }
                         for (j, var_name) in self.loopvars.iter().enumerate() {
-                            let val = match bound.get_item(j) {
-                                Ok(v) => Value::from(&v),
-                                Err(_) => Value::None,
-                            };
-                            context.set(var_name.clone(), val);
+                            context.set(var_name.clone(), chars[j].clone());
                         }
                     }
-                    _ => {
+                    Value::SafeString(s) => {
+                        let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
+                        if chars.len() != num_loopvars {
+                            context.pop();
+                            return Err(TemplateError::PythonError(
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "Need {} values to unpack in for loop; got {}.",
+                                    num_loopvars,
+                                    chars.len(),
+                                )),
+                            ));
+                        }
+                        for (j, var_name) in self.loopvars.iter().enumerate() {
+                            context.set(var_name.clone(), chars[j].clone());
+                        }
+                    }
+                    Value::PyObject(obj) => {
+                        let bound = obj.bind(py);
+                        // Collect all items first to validate count
+                        let mut unpacked = Vec::new();
+                        if let Ok(iter) = bound.try_iter() {
+                            for item in iter.flatten() {
+                                unpacked.push(Value::from(&item));
+                            }
+                        } else {
+                            // Try __getitem__ for sequences
+                            let mut j = 0;
+                            loop {
+                                match bound.get_item(j) {
+                                    Ok(v) => unpacked.push(Value::from(&v)),
+                                    Err(_) => break,
+                                }
+                                j += 1;
+                            }
+                        }
+                        if unpacked.len() != num_loopvars {
+                            context.pop();
+                            return Err(TemplateError::PythonError(
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "Need {} values to unpack in for loop; got {}.",
+                                    num_loopvars,
+                                    unpacked.len(),
+                                )),
+                            ));
+                        }
+                        for (j, var_name) in self.loopvars.iter().enumerate() {
+                            context.set(var_name.clone(), unpacked[j].clone());
+                        }
+                    }
+                    Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::None => {
+                        // Non-iterable: cannot unpack
+                        context.pop();
+                        return Err(TemplateError::PythonError(
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Need {} values to unpack in for loop; got 1.",
+                                num_loopvars,
+                            )),
+                        ));
+                    }
+                    Value::Dict(_) => {
+                        // Dict unpacking: iterate keys like Python
                         for var_name in self.loopvars.iter() {
                             context.set(var_name.clone(), Value::None);
                         }
@@ -631,20 +709,24 @@ pub fn compile_for(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
     }))
 }
 
-/// Substring-scan node tokens for `forloop`. False positives are safe
-/// (extra work); false negatives would break `forloop.counter`. Used
-/// only at parse time.
+/// Substring-scan node tokens for `forloop` or `ifchanged`. False
+/// positives are safe (extra work); false negatives would break
+/// `forloop.counter` or `{% ifchanged %}` state scoping. Used only
+/// at parse time.
 fn nodelist_references_forloop(nodelist: &NodeList) -> bool {
-    fn token_mentions_forloop(node: &dyn Node) -> bool {
+    fn token_needs_forloop(node: &dyn Node) -> bool {
         node.token()
-            .map(|t| t.contents.contains("forloop"))
+            .map(|t| {
+                t.contents.contains("forloop")
+                    || t.contents.starts_with("ifchanged")
+            })
             .unwrap_or(false)
     }
 
     fn walk(nodelist: &NodeList) -> bool {
         // NodeList::iter() skips Text entries (no template syntax).
         for node in nodelist.iter() {
-            if token_mentions_forloop(node) {
+            if token_needs_forloop(node) {
                 return true;
             }
             let mut found_in_child = false;

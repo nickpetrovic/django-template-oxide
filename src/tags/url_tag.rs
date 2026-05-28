@@ -103,7 +103,20 @@ impl Node for UrlNode {
 
             let result = reverse
                 .call((), Some(&call_kwargs))
-                .map_err(|e| TemplateError::Internal(format!("reverse() failed: {e}")))?;
+                .map_err(|e| {
+                    // Check if this is a NoReverseMatch exception and
+                    // propagate it directly so callers can catch it.
+                    let is_no_reverse = py.import("django.urls")
+                        .ok()
+                        .and_then(|m| m.getattr("NoReverseMatch").ok())
+                        .map(|cls| e.is_instance(py, &cls))
+                        .unwrap_or(false);
+                    if is_no_reverse {
+                        TemplateError::PythonError(e)
+                    } else {
+                        TemplateError::Internal(format!("reverse() failed: {e}"))
+                    }
+                })?;
             result
                 .extract::<String>()
                 .map_err(|e| TemplateError::Internal(format!("reverse() result not a string: {e}")))

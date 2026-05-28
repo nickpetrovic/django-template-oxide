@@ -19,6 +19,11 @@ pub mod variable;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
+#[pyfunction]
+fn clear_template_cache_py() {
+    tags::loader_tags::clear_template_cache();
+}
+
 /// Top-level PyO3 module exposed as `django_template_oxide._rust`.
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -31,5 +36,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(django_integration::render_nodelist, m)?)?;
     m.add_function(wrap_pyfunction!(prof::get_prof_stats, m)?)?;
     m.add_function(wrap_pyfunction!(prof::reset_prof_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_template_cache_py, m)?)?;
     Ok(())
 }

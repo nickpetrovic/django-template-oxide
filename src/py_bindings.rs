@@ -93,7 +93,9 @@ impl PyContext {
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         match self.inner.get(name) {
             Some(v) => Ok(v.to_pyobject(py)),
-            None => Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned())),
+            None => Err(pyo3::exceptions::PyAttributeError::new_err(
+                format!("'Context' object has no attribute '{}'", name),
+            )),
         }
     }
 
@@ -711,7 +713,17 @@ impl PyTemplate {
             string_if_invalid,
             engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
         )
-        .map_err(|e| -> PyErr { e.into() })?;
+        .map_err(|e| -> PyErr {
+            // When called directly via the oxide API (OxideTemplate()),
+            // use the oxide's own exception classes so callers can catch
+            // `django_template_oxide._rust.TemplateSyntaxError`.
+            match &e {
+                crate::errors::TemplateError::TemplateSyntaxError(msg) => {
+                    crate::errors::TemplateSyntaxError::new_err(msg.clone())
+                }
+                _ => e.into(),
+            }
+        })?;
 
         Ok(PyTemplate {
             inner,
@@ -734,7 +746,7 @@ impl PyTemplate {
                     ctx::Context::new(None)
                 } else if let Ok(pyctx) = obj.cast::<PyContext>() {
                     let _g = crate::prof::Guard::new("PyTemplate::render:from_PyContext");
-                    // Clone so rendering doesn't mutate the caller's.
+                    // Clone, but we'll write mutations back after render.
                     pyctx.borrow().inner.clone()
                 } else if let Ok(d) = obj.cast::<PyDict>() {
                     let _g = crate::prof::Guard::new("PyTemplate::render:from_dict");
@@ -835,6 +847,16 @@ impl PyTemplate {
         if !already_bound {
             rust_context.template = None;
             rust_context.template_name = None;
+        }
+
+        // Propagate context mutations back to the original PyContext
+        // so tags like {% firstof ... as var %} are visible to callers.
+        if let Some(obj) = context {
+            if let Ok(pyctx) = obj.cast::<PyContext>() {
+                let mut borrowed = pyctx.borrow_mut();
+                // Copy the entire base context back (including new keys)
+                borrowed.inner.base = rust_context.base;
+            }
         }
 
         result.map_err(|e| -> PyErr { e.into() })

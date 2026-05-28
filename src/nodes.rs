@@ -985,10 +985,37 @@ fn resolve_pyobject_lookups(
                 Err(None) => {
                     match current.getattr(bit_py) {
                         Ok(val) => val,
-                        Err(_attr_err) => {
+                        Err(attr_err) => {
+                            // If the attribute is in dir() but raised,
+                            // it's a @property that errored. Check
+                            // silent_variable_failure; if not set,
+                            // propagate per Django's _resolve_lookup.
+                            let in_dir = current
+                                .dir()
+                                .ok()
+                                .map(|dir_list| {
+                                    dir_list.iter().any(|item| {
+                                        item.extract::<String>()
+                                            .map(|s| s == *bit)
+                                            .unwrap_or(false)
+                                    })
+                                })
+                                .unwrap_or(false);
+                            if in_dir {
+                                let silent = attr_err
+                                    .value(py)
+                                    .getattr("silent_variable_failure")
+                                    .ok()
+                                    .and_then(|v| v.is_truthy().ok())
+                                    .unwrap_or(false);
+                                if !silent {
+                                    return Err(Some(attr_err));
+                                }
+                                return Err(None);
+                            }
+
                             // Missing attribute: try int index per
                             // `Variable._resolve_lookup`, else soft fail.
-                            // (We skip `dir()`: saves ~16us/it.)
                             match bit.parse::<i64>() {
                                 Ok(idx) => match current.get_item(idx) {
                                     Ok(val) => val,
