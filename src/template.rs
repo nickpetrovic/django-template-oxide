@@ -284,18 +284,22 @@ fn extract_token(
         .map_err(|e| TemplateError::Internal(format!("token.lineno: {e}")))?;
 
     // `(start, end)` on DebugLexer, `None` on Lexer.
-    let position: Option<usize> = match tok.getattr(attr_position) {
-        Ok(p) if p.is_none() => None,
+    let (position, source_len): (Option<usize>, Option<usize>) = match tok.getattr(attr_position) {
+        Ok(p) if p.is_none() => (None, None),
         Ok(p) => match p.extract::<(usize, usize)>() {
-            Ok((start, _end)) => Some(start),
-            Err(_) => None,
+            Ok((start, end)) => (Some(start), Some(end - start)),
+            Err(_) => (None, None),
         },
-        Err(_) => None,
+        Err(_) => (None, None),
     };
 
-    Ok(crate::lexer::Token::new(
+    let mut token = crate::lexer::Token::new(
         token_type, contents, position, lineno,
-    ))
+    );
+    if let Some(sl) = source_len {
+        token = token.with_source_len(sl);
+    }
+    Ok(token)
 }
 
 pub fn render_to_string(

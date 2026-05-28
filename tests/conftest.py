@@ -86,6 +86,7 @@ def _patch_template_render():
         oxide_tpl = OxideTemplate(
             source,
             engine=engine,
+            origin=getattr(self, "origin", None),
             name=getattr(self, "name", None),
         )
 
@@ -102,7 +103,31 @@ def _patch_template_render():
             use_tz=getattr(context, "use_tz", None),
             string_if_invalid=string_if_invalid or None,
         )
-        result = oxide_tpl.render(oxide_ctx)
+
+        # Attach render_context.template so Django's render_annotated can
+        # set template_debug on exceptions (mirrors Django's push_state).
+        oxide_ctx.render_context.template = self
+
+        try:
+            result = oxide_tpl.render(oxide_ctx)
+        except Exception as exc:
+            # Django's render_annotated attaches template_debug to
+            # exceptions in debug mode.  The oxide engine may not have
+            # gone through Django's render_annotated for native nodes,
+            # so we attach template_debug here as a fallback.
+            if (
+                engine is not None
+                and getattr(engine, "debug", False)
+                and not hasattr(exc, "template_debug")
+            ):
+                culprit = getattr(exc, "_culprit_node", None)
+                token = getattr(culprit, "token", None) if culprit else None
+                if token is not None and hasattr(self, "get_exception_info"):
+                    try:
+                        exc.template_debug = self.get_exception_info(exc, token)
+                    except Exception:
+                        pass
+            raise
 
         # Propagate context mutations (e.g. {% firstof ... as var %})
         # back to the Django context. Only propagate NEW keys that

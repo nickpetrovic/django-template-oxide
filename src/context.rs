@@ -709,7 +709,12 @@ impl Context {
     pub fn new(values: Option<ContextDict>) -> Self {
         Self {
             base: match values {
-                Some(v) => BaseContext::with_values(v),
+                Some(mut v) => {
+                    v.remove("True");
+                    v.remove("False");
+                    v.remove("None");
+                    BaseContext::with_values(v)
+                }
                 None => BaseContext::new(),
             },
             autoescape: true,

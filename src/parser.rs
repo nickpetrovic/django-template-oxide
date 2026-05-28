@@ -481,10 +481,26 @@ fn dispatch_python_compile_fn(
 
         let node_obj = py_compile_fn
             .bind(py)
-            .call1((py_parser, py_token))?
-            .unbind();
+            .call1((&py_parser, &py_token))?;
 
-        Ok(Box::new(crate::django_drop_in::PyOpaqueNode::new(node_obj))
+        // Mirrors Django's `Parser.parse` which does
+        //   node.token = token
+        //   node.origin = self.origin
+        // after the compile function returns.
+        let _ = node_obj.setattr(pyo3::intern!(py, "token"), &py_token);
+        if let Some(ref origin) = parser.origin {
+            let origin_mod = py.import("django.template.base")?;
+            let origin_cls = origin_mod.getattr(pyo3::intern!(py, "Origin"))?;
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item(pyo3::intern!(py, "name"), &origin.name)?;
+            if let Some(ref tn) = origin.template_name {
+                kwargs.set_item(pyo3::intern!(py, "template_name"), tn)?;
+            }
+            let py_origin = origin_cls.call((), Some(&kwargs))?;
+            let _ = node_obj.setattr(pyo3::intern!(py, "origin"), py_origin);
+        }
+
+        Ok(Box::new(crate::django_drop_in::PyOpaqueNode::new(node_obj.unbind()))
             as Box<dyn Node>)
     })
     .map_err(TemplateError::from)

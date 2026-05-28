@@ -86,17 +86,31 @@ thread_local! {
 
 const MAX_EXTENDS_DEPTH: u32 = 256;
 
-/// Load + compile + cache via `django.template.loader.get_template`.
+/// Load + compile via `django.template.loader.get_template`.
 /// Errors: `TemplateDoesNotExist` (not found), `TemplateSyntaxError`
 /// (parse failed).
+///
+/// `cache_key`: when `Some`, the compiled nodelist is cached in the
+/// thread-local `TEMPLATE_CACHE` under a composite key so the same
+/// `{% include %}` node reuses its compiled template across loop
+/// iterations (matching Django's `context.render_context[self]`
+/// pattern). Different IncludeNode instances use different keys, so
+/// each include gets its own node instances with distinct render-keys.
+/// When `None` (extends path), no caching is done and a fresh nodelist
+/// is returned each time.
 fn load_template_nodelist(
     py: Python<'_>,
     template_name: &str,
     context: &Context,
+    cache_key: Option<&str>,
 ) -> Result<Arc<NodeList>, TemplateError> {
-    let cached = TEMPLATE_CACHE.with_borrow(|cache| cache.get(template_name).cloned());
-    if let Some(nodelist) = cached {
-        return Ok(nodelist);
+    // Check per-include-node cache first.
+    if let Some(key) = cache_key {
+        let full_key = format!("{}\x00{}", key, template_name);
+        let cached = TEMPLATE_CACHE.with_borrow(|c| c.get(&full_key).cloned());
+        if let Some(nl) = cached {
+            return Ok(nl);
+        }
     }
 
     let (base_name, partial_name) = match template_name.split_once('#') {
@@ -127,9 +141,14 @@ fn load_template_nodelist(
         Arc::new(nodelist)
     };
 
-    TEMPLATE_CACHE.with_borrow_mut(|cache| {
-        cache.insert(template_name.to_owned(), Arc::clone(&rc));
-    });
+    // Cache per-include-node instance.
+    if let Some(key) = cache_key {
+        let full_key = format!("{}\x00{}", key, template_name);
+        TEMPLATE_CACHE.with_borrow_mut(|c| {
+            c.insert(full_key, Arc::clone(&rc));
+        });
+    }
+
     Ok(rc)
 }
 
@@ -658,14 +677,31 @@ impl ExtendsNode {
         py: Python<'_>,
         context: &mut Context,
     ) -> Result<Arc<NodeList>, TemplateError> {
+        // Get the Python Origin of the currently-rendering template.
+        // Django's `ExtendsNode.find_template` initialises history with
+        // `[self.origin]` which is the parser-set origin (carrying the
+        // full filesystem path and loader reference from the engine).
+        // We obtain the equivalent from `context.template.origin`.
+        let current_origin: Option<pyo3::Py<pyo3::PyAny>> = context
+            .template
+            .as_ref()
+            .and_then(|tref| {
+                let bound = tref.obj.bind(py);
+                // Django Template has .origin; oxide PyTemplate also exposes it.
+                bound.getattr("origin").ok().and_then(|o| {
+                    if o.is_none() { None } else { Some(o.unbind()) }
+                })
+            });
+
         // First, try to resolve as a string name
         match resolve_template_name(&self.parent_name, context) {
             Ok(name) => {
                 let engine_clone = context.engine.as_ref().map(|e| e.clone_ref(py));
                 if let Some(ref engine_py) = engine_clone {
-                    load_template_with_history(py, &name, engine_py, context)
+                    let origin_ref = current_origin.as_ref().map(|o| o.bind(py));
+                    load_template_with_history(py, &name, engine_py, context, origin_ref.as_deref())
                 } else {
-                    load_template_nodelist(py, &name, context)
+                    load_template_nodelist(py, &name, context, None)
                 }
             }
             Err(_) => {
@@ -719,22 +755,40 @@ impl ExtendsNode {
 /// Load a template using Django's `engine.find_template(name, skip=history)`.
 /// Tracks extend history in `context.render_context` to support recursive
 /// extends across multiple loaders (matching Django's ExtendsNode.find_template).
+///
+/// Django's `ExtendsNode.find_template` initialises history with
+/// `[self.origin]` the first time and stores it in
+/// `context.render_context["extends_context"]`.  Successive extends
+/// calls within the same render share the same list, preventing the
+/// engine from returning the same template twice.
+///
+/// `current_origin` is the Python `Origin` of the template that
+/// contains the `{% extends %}` tag.
 fn load_template_with_history(
     py: Python<'_>,
     template_name: &str,
     engine_py: &Py<PyAny>,
     context: &mut Context,
+    current_origin: Option<&pyo3::Bound<'_, pyo3::PyAny>>,
 ) -> Result<Arc<NodeList>, TemplateError> {
     let engine_bound = engine_py.bind(py);
 
-    // Build the skip/history list from render_context
-    let history_key = "__extends_history__".to_owned();
+    // Build the skip/history list from render_context.
+    // Key matches Django's ExtendsNode.context_key = "extends_context".
+    let history_key = "extends_context".to_owned();
 
     let history_list = match context.render_context.get(&history_key) {
         Some(Value::PyObject(obj)) => obj.clone_ref(py),
         _ => {
-            // First extends: create the history list
+            // First extends: create the history list seeded with the
+            // current template's origin (matches Django's
+            // `context.render_context.setdefault(key, [self.origin])`).
             let list = pyo3::types::PyList::empty(py);
+            if let Some(origin) = current_origin {
+                list.append(origin).map_err(|e| {
+                    TemplateError::Internal(format!("Failed to append origin: {e}"))
+                })?;
+            }
             let py_obj = list.clone().into_any().unbind();
             context.render_context.set(history_key.clone(), Value::PyObject(py_obj.clone_ref(py)));
             py_obj
@@ -764,7 +818,8 @@ fn load_template_with_history(
             (template, origin)
         }
         Err(e) => {
-            // Check if TemplateDoesNotExist
+            // Check if TemplateDoesNotExist - propagate the Python
+            // exception directly so `.tried` is preserved.
             let exc_mod = py.import("django.template.exceptions");
             let is_tdne = exc_mod
                 .as_ref()
@@ -773,11 +828,7 @@ fn load_template_with_history(
                 .map(|cls| e.is_instance(py, &cls))
                 .unwrap_or(false);
             if is_tdne {
-                return Err(TemplateError::TemplateDoesNotExist {
-                    msg: template_name.to_owned(),
-                    tried: vec![],
-                    chain: vec![],
-                });
+                return Err(TemplateError::PythonError(e));
             }
             return Err(TemplateError::PythonError(e));
         }
@@ -828,6 +879,9 @@ fn load_template_with_history(
     }
 }
 
+static INCLUDE_COUNTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// `{% include "fragment.html" %}`. Mirrors `IncludeNode`.
 #[derive(Debug)]
 pub struct IncludeNode {
@@ -836,6 +890,8 @@ pub struct IncludeNode {
     pub extra_context: Vec<(String, FilterExpression)>,
     /// `only` keyword: isolate from the parent context.
     pub isolated_context: bool,
+    /// Unique ID for per-include template caching.
+    pub cache_key: String,
     pub token_field: Option<Token>,
     pub origin_field: Option<Origin>,
 }
@@ -846,10 +902,12 @@ impl IncludeNode {
         extra_context: Vec<(String, FilterExpression)>,
         isolated_context: bool,
     ) -> Self {
+        let id = INCLUDE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
             template,
             extra_context,
             isolated_context,
+            cache_key: format!("__inc_{}", id),
             token_field: None,
             origin_field: None,
         }
@@ -864,6 +922,20 @@ impl Node for IncludeNode {
         // a Django Template object, None, or an iterable of template names.
         let template_val = super::resolve_if_value(py, &self.template, context);
 
+        // For variable template names, resolve relative paths at
+        // runtime, matching Django's IncludeNode.render which calls
+        // `construct_relative_path(self.origin.template_name, name)`.
+        let resolve_name = |name: &str| -> String {
+            if name.starts_with("./") || name.starts_with("../") {
+                let current_template = self.origin_field.as_ref()
+                    .and_then(|o| o.template_name.as_deref());
+                if let Some(resolved) = construct_relative_path(current_template, name) {
+                    return resolved;
+                }
+            }
+            name.to_owned()
+        };
+
         let nodelist = match &template_val {
             Value::String(s) if s.is_empty() => {
                 // Variable not found -> TemplateSyntaxError
@@ -871,8 +943,14 @@ impl Node for IncludeNode {
                     "Template name resolved to empty string".to_owned(),
                 ));
             }
-            Value::String(s) => load_template_nodelist(py, s, context)?,
-            Value::SafeString(s) => load_template_nodelist(py, s.as_ref(), context)?,
+            Value::String(s) => {
+                let resolved = resolve_name(s);
+                load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?
+            }
+            Value::SafeString(s) => {
+                let resolved = resolve_name(s.as_ref());
+                load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?
+            }
             Value::None => {
                 return Err(TemplateError::TemplateDoesNotExist {
                     msg: "No template names provided".to_owned(),
@@ -903,7 +981,7 @@ impl Node for IncludeNode {
                     )?;
                     Arc::new(nl)
                 } else if let Ok(name) = bound.extract::<String>() {
-                    load_template_nodelist(py, &name, context)?
+                    load_template_nodelist(py, &name, context, Some(&self.cache_key))?
                 } else if bound.is_none() {
                     return Err(TemplateError::TemplateDoesNotExist {
                         msg: "No template names provided".to_owned(),
@@ -939,7 +1017,7 @@ impl Node for IncludeNode {
                             } else {
                                 continue;
                             };
-                            match load_template_nodelist(py, &name, context) {
+                            match load_template_nodelist(py, &name, context, Some(&self.cache_key)) {
                                 Ok(nl) => {
                                     // Found! Use this directly with extra context below
                                     let mut extra: HashMap<String, Value> = HashMap::new();

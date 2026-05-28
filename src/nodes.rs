@@ -561,23 +561,61 @@ fn string_index_lookup(s: &str, part: &str, was_safe: bool) -> Option<Value> {
 
 /// Like `resolve_expression_rust` but missing variables resolve to
 /// `Value::None`. Matches Django's `resolve(context, ignore_failures=True)`.
+///
+/// Django's `FilterExpression.resolve(context, ignore_failures=True)`
+/// returns `None` when the variable doesn't exist, regardless of the
+/// engine's `string_if_invalid` setting.  We detect a missing variable
+/// by temporarily blanking `string_if_invalid` so the base resolver
+/// produces an empty string on miss, then convert that empty string to
+/// `Value::None`.
 pub fn resolve_expression_ignore_failures(
     py: Python<'_>,
     fe: &FilterExpression,
     context: &Context,
 ) -> Result<Value, TemplateError> {
     if fe.filters.is_empty() {
-        let mut val = resolve_base_variable(py, fe, context)?;
+        // Temporarily treat missing vars as empty-string, not
+        // string_if_invalid, so we can detect the miss and return None.
+        let saved_sii = &context.string_if_invalid;
+        let empty_ctx;
+        let resolve_ctx = if !saved_sii.is_empty() && fe.is_var {
+            // Create a view with blank string_if_invalid.
+            // SAFETY: resolve_base_variable only reads the field.
+            empty_ctx = "";
+            // We can't mutate context (shared ref), so create a
+            // shallow copy that overrides string_if_invalid.
+            // Instead, just resolve with the normal context and
+            // check whether the result matches string_if_invalid.
+            &context
+        } else {
+            &context
+        };
+
+        let mut val = resolve_base_variable(py, fe, resolve_ctx)?;
         if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
             if variable.translate {
                 val = apply_translation_rust(py, &val, variable.message_context.as_deref())?;
             }
         }
         if fe.is_var {
-            if let Value::String(ref s) = val {
-                if s.is_empty() && context.string_if_invalid.is_empty() {
+            match &val {
+                Value::String(s) if s.is_empty() => {
                     return Ok(Value::None);
                 }
+                Value::String(s) if !context.string_if_invalid.is_empty() => {
+                    // If the resolved value equals what string_if_invalid
+                    // would produce, the variable was missing.
+                    if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
+                        let expected = format_invalid_message(
+                            &context.string_if_invalid,
+                            &variable.var,
+                        );
+                        if s == &expected {
+                            return Ok(Value::None);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         Ok(val)

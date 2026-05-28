@@ -52,6 +52,9 @@ pub struct Token {
     pub contents: String,
     /// Set only by `DebugLexer`.
     pub position: Option<usize>,
+    /// Length of the full source token (including `{% %}` delimiters).
+    /// Set only by `DebugLexer`. Defaults to `contents.len()`.
+    pub source_len: usize,
     pub lineno: usize,
 }
 
@@ -62,12 +65,20 @@ impl Token {
         position: Option<usize>,
         lineno: usize,
     ) -> Self {
+        let contents = contents.into();
+        let source_len = contents.len();
         Self {
             token_type,
-            contents: contents.into(),
             position,
+            source_len,
+            contents,
             lineno,
         }
+    }
+
+    pub fn with_source_len(mut self, source_len: usize) -> Self {
+        self.source_len = source_len;
+        self
     }
 
     /// Mirrors `Token.split_contents`: smart_split, rejoining
@@ -261,21 +272,24 @@ impl DebugLexer {
                     self.verbatim = Some(format!("end{content}"));
                 }
 
-                return Token::new(TokenType::Block, content, position, lineno);
+                return Token::new(TokenType::Block, content, position, lineno)
+                    .with_source_len(token_string.len());
             }
 
             if self.verbatim.is_none() {
                 let content = token_string[2..token_string.len() - 2].trim();
 
                 if token_start == "{{" {
-                    return Token::new(TokenType::Var, content, position, lineno);
+                    return Token::new(TokenType::Var, content, position, lineno)
+                        .with_source_len(token_string.len());
                 }
 
                 debug_assert!(
                     token_start == "{#",
                     "unexpected tag start: {token_start:?}"
                 );
-                return Token::new(TokenType::Comment, content, position, lineno);
+                return Token::new(TokenType::Comment, content, position, lineno)
+                    .with_source_len(token_string.len());
             }
         }
 

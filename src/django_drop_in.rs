@@ -89,7 +89,7 @@ impl PyToken {
         let contents_obj = pyo3::types::PyString::new(py, &token.contents)
             .into_any()
             .unbind();
-        let position = token.position.map(|p| (p, p + token.contents.len()));
+        let position = token.position.map(|p| (p, p + token.source_len));
         Ok(Self {
             token_type_obj,
             contents_obj,
@@ -461,7 +461,9 @@ impl PyParser {
     fn prepend_token(&self, token: &PyToken) {
         let parser = unsafe { &mut *self.parser_ptr };
         let pos = token.position.map(|(start, _end)| start);
-        let rust_token = Token::new(token.kind, token.contents_rust.clone(), pos, token.lineno);
+        let source_len = token.position.map(|(start, end)| end - start).unwrap_or(token.contents_rust.len());
+        let rust_token = Token::new(token.kind, token.contents_rust.clone(), pos, token.lineno)
+            .with_source_len(source_len);
         parser.prepend_token(rust_token);
     }
 
