@@ -17,6 +17,12 @@ use crate::parser::{Parser, TagCompileFunc};
 use crate::template::Template;
 use crate::variable::{FilterExpression, FilterExpressionVar};
 
+/// Render-context key for the current template's Python Origin. Used by
+/// `ExtendsNode` to seed extends history with the correct origin when
+/// templates are loaded by `{% include %}` (where `context.template`
+/// still points to the outer template).
+const CURRENT_ORIGIN_KEY: &str = "__oxide_current_origin";
+
 /// Mirrors `BlockContext`. Per-name FIFO: `add_blocks` pushes front,
 /// `pop` / `get_block` read back.
 #[derive(Debug, Clone)]
@@ -98,18 +104,21 @@ const MAX_EXTENDS_DEPTH: u32 = 256;
 /// each include gets its own node instances with distinct render-keys.
 /// When `None` (extends path), no caching is done and a fresh nodelist
 /// is returned each time.
+/// Returns `(nodelist, origin)`. `origin` is the Python `Origin` of the
+/// loaded Django Template, `None` when served from cache or when the
+/// loader path does not produce one.
 fn load_template_nodelist(
     py: Python<'_>,
     template_name: &str,
     context: &Context,
     cache_key: Option<&str>,
-) -> Result<Arc<NodeList>, TemplateError> {
+) -> Result<(Arc<NodeList>, Option<Py<PyAny>>), TemplateError> {
     // Check per-include-node cache first.
     if let Some(key) = cache_key {
         let full_key = format!("{}\x00{}", key, template_name);
         let cached = TEMPLATE_CACHE.with_borrow(|c| c.get(&full_key).cloned());
         if let Some(nl) = cached {
-            return Ok(nl);
+            return Ok((nl, None));
         }
     }
 
@@ -118,7 +127,7 @@ fn load_template_nodelist(
         None => (template_name, None),
     };
 
-    let (source, engine) = load_template_source_and_engine(py, base_name, context)?;
+    let (source, engine, origin) = load_template_source_and_engine(py, base_name, context)?;
     let engine_bound = engine.as_ref().map(|e| e.bind(py));
     let nodelist = Template::compile_nodelist_with_engine(
         &source,
@@ -149,7 +158,7 @@ fn load_template_nodelist(
         });
     }
 
-    Ok(rc)
+    Ok((rc, origin))
 }
 
 pub fn clear_template_cache() {
@@ -190,11 +199,14 @@ fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>>
 /// `compile_nodelist_with_engine`, which is what makes
 /// `{% cotton ... %}` and other third-party tags resolve inside
 /// `{% include %}`/`{% extends %}` chains.
+/// Returns `(source, engine, origin)`. `origin` is the Python `Origin`
+/// of the loaded Django Template, used to seed `extends_context` history
+/// so same-name-multi-loader chains skip correctly.
 fn load_template_source_and_engine<'py>(
     py: Python<'py>,
     template_name: &str,
     context: &Context,
-) -> Result<(String, Option<pyo3::Py<pyo3::PyAny>>), TemplateError> {
+) -> Result<(String, Option<pyo3::Py<pyo3::PyAny>>, Option<pyo3::Py<pyo3::PyAny>>), TemplateError> {
     let map_py_err = |e: pyo3::PyErr| -> TemplateError {
         let exc_mod = py.import("django.template.exceptions");
         let is_tdne = exc_mod
@@ -242,7 +254,11 @@ fn load_template_source_and_engine<'py>(
                     template_name, e
                 ))
             })?;
-        return Ok((source, Some(engine_py.clone())));
+        let origin = django_template
+            .getattr("origin")
+            .ok()
+            .and_then(|o| if o.is_none() { None } else { Some(o.unbind()) });
+        return Ok((source, Some(engine_py.clone()), origin));
     }
 
     let loader = py.import("django.template.loader").map_err(|e| {
@@ -269,11 +285,15 @@ fn load_template_source_and_engine<'py>(
                 template_name, e
             ))
         })?;
+    let origin = inner_template
+        .getattr("origin")
+        .ok()
+        .and_then(|o| if o.is_none() { None } else { Some(o.unbind()) });
     let engine = django_template
         .getattr("engine")
         .ok()
         .map(|e| e.unbind());
-    Ok((source, engine))
+    Ok((source, engine, origin))
 }
 
 /// `FilterExpression` -> template name. Constants extract directly;
@@ -681,15 +701,23 @@ impl ExtendsNode {
         // Django's `ExtendsNode.find_template` initialises history with
         // `[self.origin]` which is the parser-set origin (carrying the
         // full filesystem path and loader reference from the engine).
-        // We obtain the equivalent from `context.template.origin`.
+        //
+        // Check render_context first: IncludeNode stores the loaded
+        // template's origin under CURRENT_ORIGIN_KEY so inner extends
+        // chains use the correct origin (not the outer template's).
         let current_origin: Option<pyo3::Py<pyo3::PyAny>> = context
-            .template
-            .as_ref()
-            .and_then(|tref| {
-                let bound = tref.obj.bind(py);
-                // Django Template has .origin; oxide PyTemplate also exposes it.
-                bound.getattr("origin").ok().and_then(|o| {
-                    if o.is_none() { None } else { Some(o.unbind()) }
+            .render_context
+            .get(CURRENT_ORIGIN_KEY)
+            .and_then(|v| match v {
+                Value::PyObject(obj) => Some(obj.clone_ref(py)),
+                _ => None,
+            })
+            .or_else(|| {
+                context.template.as_ref().and_then(|tref| {
+                    let bound = tref.obj.bind(py);
+                    bound.getattr("origin").ok().and_then(|o| {
+                        if o.is_none() { None } else { Some(o.unbind()) }
+                    })
                 })
             });
 
@@ -701,7 +729,7 @@ impl ExtendsNode {
                     let origin_ref = current_origin.as_ref().map(|o| o.bind(py));
                     load_template_with_history(py, &name, engine_py, context, origin_ref.as_deref())
                 } else {
-                    load_template_nodelist(py, &name, context, None)
+                    load_template_nodelist(py, &name, context, None).map(|(nl, _origin)| nl)
                 }
             }
             Err(_) => {
@@ -936,7 +964,9 @@ impl Node for IncludeNode {
             name.to_owned()
         };
 
-        let nodelist = match &template_val {
+        let nodelist;
+        let mut loaded_origin: Option<Py<PyAny>> = None;
+        match &template_val {
             Value::String(s) if s.is_empty() => {
                 // Variable not found -> TemplateSyntaxError
                 return Err(TemplateError::TemplateSyntaxError(
@@ -945,11 +975,15 @@ impl Node for IncludeNode {
             }
             Value::String(s) => {
                 let resolved = resolve_name(s);
-                load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?
+                let (nl, origin) = load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?;
+                nodelist = nl;
+                loaded_origin = origin;
             }
             Value::SafeString(s) => {
                 let resolved = resolve_name(s.as_ref());
-                load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?
+                let (nl, origin) = load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?;
+                nodelist = nl;
+                loaded_origin = origin;
             }
             Value::None => {
                 return Err(TemplateError::TemplateDoesNotExist {
@@ -979,9 +1013,11 @@ impl Node for IncludeNode {
                         false,
                         engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
                     )?;
-                    Arc::new(nl)
+                    nodelist = Arc::new(nl);
                 } else if let Ok(name) = bound.extract::<String>() {
-                    load_template_nodelist(py, &name, context, Some(&self.cache_key))?
+                    let (nl, origin) = load_template_nodelist(py, &name, context, Some(&self.cache_key))?;
+                    nodelist = nl;
+                    loaded_origin = origin;
                 } else if bound.is_none() {
                     return Err(TemplateError::TemplateDoesNotExist {
                         msg: "No template names provided".to_owned(),
@@ -1018,7 +1054,7 @@ impl Node for IncludeNode {
                                 continue;
                             };
                             match load_template_nodelist(py, &name, context, Some(&self.cache_key)) {
-                                Ok(nl) => {
+                                Ok((nl, _origin)) => {
                                     // Found! Use this directly with extra context below
                                     let mut extra: HashMap<String, Value> = HashMap::new();
                                     for (key, expr) in &self.extra_context {
@@ -1032,6 +1068,7 @@ impl Node for IncludeNode {
                                         isolated.use_tz = context.use_tz;
                                         isolated.string_if_invalid = context.string_if_invalid.clone();
                                         isolated.engine = context.engine.clone();
+                                        isolated.debug = context.debug;
                                         let result = nl.render(py, &mut isolated)?;
                                         return Ok(result.as_str().to_owned());
                                     } else if !extra.is_empty() {
@@ -1072,7 +1109,7 @@ impl Node for IncludeNode {
                     other,
                 )));
             }
-        };
+        }
 
         let mut extra: HashMap<String, Value> = HashMap::new();
         for (key, expr) in &self.extra_context {
@@ -1083,6 +1120,35 @@ impl Node for IncludeNode {
 
         let saved_block_context = context.block_context.take();
 
+        // Save and clear extends_context and current_origin so the
+        // included template's extends chain starts fresh (matching
+        // Django's Template.render which wraps in push_state). We
+        // don't push a full render_context layer because {% ifchanged %}
+        // state must persist across includes within a for loop.
+        let saved_extends_ctx = context.render_context.get("extends_context")
+            .cloned();
+        let saved_current_origin = context.render_context.get(CURRENT_ORIGIN_KEY)
+            .cloned();
+        // Remove extends_context from current layer so inner extends
+        // chain starts fresh.
+        if saved_extends_ctx.is_some() {
+            context.render_context.set(
+                "extends_context".to_owned(),
+                Value::None,
+            );
+        }
+
+        // Store the loaded template's Python Origin so ExtendsNode
+        // inside the included template can use it to seed extends
+        // history correctly (instead of context.template.origin which
+        // points to the outer template).
+        if let Some(origin) = loaded_origin {
+            context.render_context.set(
+                CURRENT_ORIGIN_KEY.to_owned(),
+                Value::PyObject(origin),
+            );
+        }
+
         let render_result = if self.isolated_context {
             let mut isolated = Context::new(Some(extra));
             isolated.autoescape = context.autoescape;
@@ -1090,6 +1156,7 @@ impl Node for IncludeNode {
             isolated.use_tz = context.use_tz;
             isolated.string_if_invalid = context.string_if_invalid.clone();
             isolated.engine = context.engine.clone();
+            isolated.debug = context.debug;
             nodelist.render(py, &mut isolated)
         } else if !extra.is_empty() {
             context.push_with(extra);
@@ -1099,6 +1166,25 @@ impl Node for IncludeNode {
         } else {
             nodelist.render(py, context)
         };
+
+        // Restore extends_context and current_origin.
+        if let Some(v) = saved_extends_ctx {
+            context.render_context.set("extends_context".to_owned(), v);
+        } else {
+            // Remove the key the inner chain may have created.
+            context.render_context.set(
+                "extends_context".to_owned(),
+                Value::None,
+            );
+        }
+        if let Some(v) = saved_current_origin {
+            context.render_context.set(CURRENT_ORIGIN_KEY.to_owned(), v);
+        } else {
+            context.render_context.set(
+                CURRENT_ORIGIN_KEY.to_owned(),
+                Value::None,
+            );
+        }
 
         context.block_context = saved_block_context;
 

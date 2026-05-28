@@ -818,6 +818,11 @@ impl PyTemplate {
             rust_context.engine = this.engine_value.clone();
         }
 
+        // Propagate debug flag from the template to the context.
+        if this.inner.debug {
+            rust_context.debug = true;
+        }
+
         // Bind `self` to `context.template` for the duration of the
         // render - mirrors Django's `Template.render` which wraps the
         // nodelist call in `with context.bind_template(self):`. Many

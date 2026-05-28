@@ -692,6 +692,9 @@ pub struct Context {
     /// through the Engine's loader chain (locmem, filesystem, cached,
     /// etc.) instead of the global `django.template.loader`.
     pub engine: Option<Py<PyAny>>,
+    /// Engine debug flag. When true, `VariableDoesNotExist` is raised
+    /// instead of silently substituting `string_if_invalid`.
+    pub debug: bool,
 }
 
 /// Per-iteration cache populated by ForNode when its body has a
@@ -727,6 +730,7 @@ impl Context {
             loop_batch_cache: None,
             block_context: None,
             engine: None,
+            debug: false,
         }
     }
 
@@ -812,6 +816,7 @@ impl Context {
             loop_batch_cache: None,
             block_context: None,
             engine: self.engine.clone(),
+            debug: self.debug,
         }
     }
 

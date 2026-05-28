@@ -16,6 +16,61 @@ use crate::filters::get_default_filters;
 /// `django.template.base.UNKNOWN_SOURCE`.
 pub const UNKNOWN_SOURCE: &str = "<unknown source>";
 
+/// Attach `template_debug` to a `TemplateError` when debug mode is on.
+/// Mirrors Django's `Node.render_annotated` (base.py:1044-1068) which
+/// calls `context.render_context.template.get_exception_info(e, token)`.
+fn attach_template_debug(
+    py: Python<'_>,
+    err: TemplateError,
+    token: Option<&Token>,
+    _origin: Option<&Origin>,
+    context: &Context,
+) -> TemplateError {
+    let token = match token {
+        Some(t) => t,
+        None => return err,
+    };
+
+    // Convert the Rust error to a Python exception first so we can
+    // set attributes on it.
+    let py_err: pyo3::PyErr = err.into();
+    let exc_obj = py_err.value(py);
+
+    // Don't overwrite if already set (matches Django's `not hasattr(e, "template_debug")`).
+    if exc_obj.hasattr("template_debug").unwrap_or(false) {
+        return TemplateError::PythonError(py_err);
+    }
+
+    // Get the template from render_context (set by conftest / Django's push_state).
+    let template_obj = context.render_context.template.as_ref().map(|t| t.obj.bind(py));
+    let template_obj = match template_obj {
+        Some(t) => t,
+        None => {
+            // Fall back to context.template
+            match context.template.as_ref() {
+                Some(t) => t.obj.bind(py),
+                None => return TemplateError::PythonError(py_err),
+            }
+        }
+    };
+
+    // Build a Python Token for get_exception_info
+    if let Ok(py_token) = crate::django_drop_in::PyToken::from_rust_token(py, token) {
+        let py_token_obj = match pyo3::Py::new(py, py_token) {
+            Ok(t) => t,
+            Err(_) => return TemplateError::PythonError(py_err),
+        };
+
+        if let Ok(get_exc_info) = template_obj.getattr("get_exception_info") {
+            if let Ok(debug_info) = get_exc_info.call1((&py_err, py_token_obj)) {
+                let _ = exc_obj.setattr("template_debug", debug_info);
+            }
+        }
+    }
+
+    TemplateError::PythonError(py_err)
+}
+
 /// Where a template was loaded from. Mirrors `django.template.base.Origin`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
@@ -252,14 +307,25 @@ impl NodeList {
         context: &mut Context,
         out: &mut String,
     ) -> Result<(), TemplateError> {
+        let debug = context.debug;
         for entry in &self.nodes {
             match entry {
                 NodeEntry::Text(s) => out.push_str(s),
                 NodeEntry::Variable(var_node) => {
-                    var_node.render_annotated_into(py, context, out)?;
+                    if let Err(e) = var_node.render_annotated_into(py, context, out) {
+                        if debug {
+                            return Err(attach_template_debug(py, e, var_node.token(), var_node.origin(), context));
+                        }
+                        return Err(e);
+                    }
                 }
                 NodeEntry::Boxed(node) => {
-                    node.render_annotated_into(py, context, out)?;
+                    if let Err(e) = node.render_annotated_into(py, context, out) {
+                        if debug {
+                            return Err(attach_template_debug(py, e, node.token(), node.origin(), context));
+                        }
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -1540,6 +1606,24 @@ fn resolve_filter_arg(
 ) -> Result<Value, TemplateError> {
     if arg.is_lookup {
         let var = arg.variable.as_ref().expect("lookup arg without variable");
+        // Django's `FilterExpression.resolve` (base.py:803-809) calls
+        // `arg.resolve(context)` which calls `Variable.resolve()`.
+        // Variable._resolve_lookup raises VariableDoesNotExist when
+        // the variable is missing. This propagates uncaught through
+        // FilterExpression.resolve. Oxide must match this behaviour.
+        //
+        // Skip the check for numeric literals and string literals
+        // (they don't need context lookup) and for the variable part
+        // of dotted paths (resolve_lookup_arg_native handles those).
+        if !var.is_literal() {
+            let first_part = var.var.split('.').next().unwrap_or("");
+            if context.get(first_part).is_none() {
+                return Err(TemplateError::VariableDoesNotExist {
+                    msg: "Failed lookup for key [%s]".into(),
+                    params: vec![first_part.to_owned()],
+                });
+            }
+        }
         Ok(resolve_lookup_arg_native(py, context, &var.var))
     } else if let Some(var) = &arg.variable {
         // Translatable constant: _("...").
@@ -1605,6 +1689,22 @@ fn resolve_with_filters_inner(
     if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
         if variable.translate {
             obj = apply_translation_rust(py, &obj, variable.message_context.as_deref())?;
+        }
+    }
+
+    // Django's FilterExpression.resolve (base.py:792-798): when the
+    // base variable is missing and string_if_invalid is non-empty,
+    // return string_if_invalid immediately WITHOUT running filters.
+    if !ignore_failures && fe.is_var && !context.string_if_invalid.is_empty() {
+        if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
+            // Detect a variable miss: the resolved value equals what
+            // format_invalid_message would produce.
+            let expected = format_invalid_message(&context.string_if_invalid, &variable.var);
+            if let Value::String(ref s) = obj {
+                if *s == expected {
+                    return Ok(obj);
+                }
+            }
         }
     }
 

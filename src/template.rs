@@ -76,23 +76,21 @@ impl Template {
         // is the canonical case). Without one: pure-Rust lexer.
         let tokens = {
             let _g = crate::prof::Guard::new("compile_nodelist:tokenize");
-            match engine {
-                Some(engine_obj) => Python::attach(|py| -> Result<Vec<crate::lexer::Token>, TemplateError> {
-                    // Always use Django's lexer when an engine is
-                    // present. Identity-checking against a snapshot is
-                    // unsafe because monkey-patches usually land before
-                    // our AppConfig.ready runs.
-                    py_tokenize_via_django(py, source, debug, engine_obj)
-                })?,
-                None => {
-                    if debug {
-                        let mut lexer = DebugLexer::new(source);
-                        lexer.tokenize()
-                    } else {
-                        let mut lexer = Lexer::new(source);
-                        lexer.tokenize()
-                    }
-                }
+            let use_python_lexer = engine.map_or(false, |eng| {
+                Python::attach(|py| {
+                    needs_python_lexer(py, eng).unwrap_or(false)
+                })
+            });
+            if use_python_lexer {
+                Python::attach(|py| -> Result<Vec<crate::lexer::Token>, TemplateError> {
+                    py_tokenize_via_django(py, source, debug, engine.unwrap())
+                })?
+            } else if debug {
+                let mut lexer = DebugLexer::new(source);
+                lexer.tokenize()
+            } else {
+                let mut lexer = Lexer::new(source);
+                lexer.tokenize()
             }
         };
 
@@ -155,6 +153,23 @@ impl Template {
         let safe = self.nodelist.render(py, context)?;
         Ok(safe.as_str().to_owned())
     }
+}
+
+use std::sync::OnceLock;
+
+static STOCK_LEXER_TOKENIZE_ID: OnceLock<isize> = OnceLock::new();
+
+fn needs_python_lexer(
+    py: pyo3::Python<'_>,
+    _engine: &pyo3::Bound<'_, pyo3::PyAny>,
+) -> pyo3::PyResult<bool> {
+    let base = py.import("django.template.base")?;
+    let lexer_cls = base.getattr("Lexer")?;
+    let current_tokenize = lexer_cls.getattr("tokenize")?;
+    let current_id = current_tokenize.as_ptr() as isize;
+
+    let stock_id = *STOCK_LEXER_TOKENIZE_ID.get_or_init(|| current_id);
+    Ok(current_id != stock_id)
 }
 
 /// Tokenise via Django's (possibly monkey-patched) Lexer/DebugLexer.
