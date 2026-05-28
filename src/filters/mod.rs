@@ -945,38 +945,32 @@ fn filter_slice(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     Value::List(result)
 }
 
-/// `dictsort`: sort list of dicts by key.
+/// `dictsort`: delegates to Django's `dictsort` filter for correct
+/// dotted-key resolution on Python objects.
 fn filter_dictsort(value: &Value, args: &[Value], _autoescape: bool) -> Value {
-    let key = arg_as_string(args, "");
-    match value {
-        Value::List(items) => {
-            let mut sorted = items.clone();
-            sorted.sort_by(|a, b| {
-                let a_val = dict_get_dotted(a, &key);
-                let b_val = dict_get_dotted(b, &key);
-                compare_values(&a_val, &b_val)
-            });
-            Value::List(sorted)
-        }
-        _ => value.clone(),
-    }
+    _dictsort_via_python(value, args, false)
 }
 
-/// `dictsortreversed`: sort list of dicts by key, reversed.
+/// `dictsortreversed`: delegates to Django's `dictsortreversed` filter.
 fn filter_dictsortreversed(value: &Value, args: &[Value], _autoescape: bool) -> Value {
-    let key = arg_as_string(args, "");
-    match value {
-        Value::List(items) => {
-            let mut sorted = items.clone();
-            sorted.sort_by(|a, b| {
-                let a_val = dict_get_dotted(a, &key);
-                let b_val = dict_get_dotted(b, &key);
-                compare_values(&b_val, &a_val) // reversed
-            });
-            Value::List(sorted)
+    _dictsort_via_python(value, args, true)
+}
+
+fn _dictsort_via_python(value: &Value, args: &[Value], reversed: bool) -> Value {
+    Python::attach(|py| {
+        let filters = py.import("django.template.defaultfilters").expect("defaultfilters");
+        let func_name = if reversed { "dictsortreversed" } else { "dictsort" };
+        let py_val = value.to_pyobject(py);
+        let py_arg = if args.is_empty() {
+            "".into_pyobject(py).expect("str").into_any().unbind()
+        } else {
+            args[0].to_pyobject(py)
+        };
+        match filters.call_method1(func_name, (py_val.bind(py), py_arg.bind(py))) {
+            Ok(result) => Value::from(&result),
+            Err(_) => value.clone(),
         }
-        _ => value.clone(),
-    }
+    })
 }
 
 /// Get a value from a dict by dotted key path.
@@ -1698,9 +1692,16 @@ fn filter_phone2numeric(value: &Value, _args: &[Value], _autoescape: bool) -> Va
     preserve_safety(value, out)
 }
 
-/// `pprint`: pretty-print (simplified).
+/// `pprint`: delegates to Python's `pprint.pformat` for correct output.
 fn filter_pprint(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
-    let out = format!("{value:#?}");
+    let out = Python::attach(|py| {
+        let pprint = py.import("pprint").expect("pprint module");
+        let py_val = value.to_pyobject(py);
+        pprint
+            .call_method1("pformat", (py_val.bind(py),))
+            .and_then(|r| r.extract::<String>())
+            .unwrap_or_else(|_| format!("{value:#?}"))
+    });
     Value::String(out)
 }
 
@@ -1765,14 +1766,30 @@ fn filter_stringformat(value: &Value, args: &[Value], _autoescape: bool) -> Valu
     Value::String(out)
 }
 
-/// `truncatechars_html`: HTML-aware truncate (falls back to plain).
+/// `truncatechars_html`: delegates to Django for HTML tag balancing.
 fn filter_truncatechars_html(value: &Value, args: &[Value], _autoescape: bool) -> Value {
-    filter_truncatechars(value, args, _autoescape)
+    _truncate_html_via_python(value, args, "truncatechars_html")
 }
 
-/// `truncatewords_html`: HTML-aware truncate (falls back to plain).
+/// `truncatewords_html`: delegates to Django for HTML tag balancing.
 fn filter_truncatewords_html(value: &Value, args: &[Value], _autoescape: bool) -> Value {
-    filter_truncatewords(value, args, _autoescape)
+    _truncate_html_via_python(value, args, "truncatewords_html")
+}
+
+fn _truncate_html_via_python(value: &Value, args: &[Value], func_name: &str) -> Value {
+    Python::attach(|py| {
+        let filters = py.import("django.template.defaultfilters").expect("defaultfilters");
+        let py_val = value.to_pyobject(py);
+        let py_arg = if args.is_empty() {
+            0i64.into_pyobject(py).expect("int").into_any().unbind()
+        } else {
+            args[0].to_pyobject(py)
+        };
+        match filters.call_method1(func_name, (py_val.bind(py), py_arg.bind(py))) {
+            Ok(result) => Value::from(&result),
+            Err(_) => value.clone(),
+        }
+    })
 }
 
 /// Built-in filter id for direct-match dispatch. LLVM can inline match

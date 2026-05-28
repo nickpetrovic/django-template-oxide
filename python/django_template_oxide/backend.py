@@ -210,6 +210,12 @@ class OxideTemplateAdapter:
         # its own per-render `RenderContext::push_state`; see
         # context.rs RenderContext.
         if request is None and (context is None or type(context) is dict):
+            if template_rendered.receivers:
+                from django.template import Context as DjContext
+                template_rendered.send(
+                    sender=self, template=self,
+                    context=DjContext(context or {}),
+                )
             try:
                 return self.template.render(context)
             except TemplateDoesNotExist as exc:
