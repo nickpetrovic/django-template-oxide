@@ -1414,6 +1414,18 @@ impl Node for CsrfTokenNode {
             Some(Value::SafeString(s)) if !s.is_empty() && s.as_ref() != "NOTPROVIDED" => {
                 s.as_ref().to_owned()
             }
+            Some(Value::PyObject(obj)) => {
+                let s = Python::attach(|py| {
+                    obj.bind(py)
+                        .str()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
+                if s.is_empty() || s == "NOTPROVIDED" {
+                    return Ok(String::new());
+                }
+                s
+            }
             _ => return Ok(String::new()),
         };
 
