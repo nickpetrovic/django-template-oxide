@@ -33,6 +33,7 @@ auto-escape rules, context-processor pipeline), the
 from django.template import TemplateDoesNotExist
 from django.template.backends.django import DjangoTemplates, copy_exception, reraise
 from django.template.context import make_context
+from django.test.signals import template_rendered
 
 from django_template_oxide._rust import Template as _RustTemplate, Context as _RustContext
 
@@ -179,6 +180,10 @@ class OxideTemplateAdapter:
         self._origin = origin
 
     @property
+    def name(self):
+        return self._name
+
+    @property
     def origin(self):
         return self._origin if self._origin is not None else getattr(
             self.template, "origin", None
@@ -215,9 +220,8 @@ class OxideTemplateAdapter:
             context, request, autoescape=self.backend.engine.autoescape
         )
 
-        # Same render_context / bind_template dance as Django's
-        # Template.render. Critical for tags that access
-        # context.template.engine.debug etc.
+        template_rendered.send(sender=self, template=self, context=dj_ctx)
+
         try:
             with dj_ctx.render_context.push_state(self):
                 if dj_ctx.template is None:

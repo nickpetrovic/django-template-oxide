@@ -6,9 +6,9 @@ pub mod i18n_tags;
 pub mod loader_tags;
 pub mod url_tag;
 
-pub(crate) use cache_tag::{compile_cache, CacheNode};
-pub(crate) use for_tag::{compile_for, ForBatchPlan, ForNode};
-pub(crate) use url_tag::{compile_url, UrlNode};
+pub(crate) use cache_tag::compile_cache;
+pub(crate) use for_tag::compile_for;
+pub(crate) use url_tag::compile_url;
 
 use std::collections::HashMap;
 
@@ -526,8 +526,7 @@ pub fn compile_comment(
     parser: &mut Parser,
     _token: &Token,
 ) -> Result<Box<dyn Node>, TemplateError> {
-    parser.parse(&["endcomment"])?;
-    parser.delete_first_token();
+    parser.skip_past("endcomment")?;
 
     Ok(Box::new(CommentNode {
         token_field: None,
@@ -2453,8 +2452,10 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_undefined_errors() {
-        let result = parse_template("{% partial undefined_partial %}");
+    fn test_partial_undefined_errors_at_render_time() {
+        // Parsing succeeds (forward references are allowed); the error
+        // surfaces at render time when the partial name can't be found.
+        let result = render("{% partial undefined_partial %}", vec![]);
         assert!(result.is_err());
     }
 

@@ -391,27 +391,42 @@ fn filter_rjust(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     preserve_safety(value, out)
 }
 
-/// `slugify`: URL-friendly slug. Simplified ASCII-only (Django uses
-/// `unicodedata.normalize('NFKD')` and strips non-ASCII marks).
+/// `slugify`: URL-friendly slug matching Django's `django.utils.text.slugify`.
+/// NFKD-normalizes, strips non-ASCII, lowercases, removes non-word chars
+/// (except hyphens), collapses whitespace/hyphens, strips leading/trailing
+/// hyphens and underscores.
 fn filter_slugify(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
+    use unicode_normalization::UnicodeNormalization;
+
     let s = value_to_string(value);
-    let lower = s.to_lowercase();
-    let mut slug = String::with_capacity(lower.len());
-    let mut prev_was_hyphen = true;
-    for c in lower.chars() {
-        if c.is_alphanumeric() || c == '_' {
-            slug.push(c);
-            prev_was_hyphen = false;
-        } else if c == '-' || c == ' ' || c == '\t' || c == '\n' {
-            if !prev_was_hyphen {
+    // Step 1-2: NFKD normalize, then strip non-ASCII (matching Python's
+    // unicodedata.normalize('NFKD').encode('ascii', 'ignore').decode('ascii'))
+    let ascii: String = s.nfkd().filter(|c| c.is_ascii()).collect();
+    // Step 3: lowercase, remove anything that isn't alphanumeric, whitespace,
+    // underscore, or hyphen (matches re.sub(r'[^\w\s-]', '', ...))
+    let lower = ascii.to_lowercase();
+    let cleaned: String = lower
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '-' || *c == '_')
+        .collect();
+    // Step 4: collapse whitespace/hyphens into single hyphens
+    // (matches re.sub(r'[-\s]+', '-', ...))
+    let mut slug = String::with_capacity(cleaned.len());
+    let mut prev_was_sep = false;
+    for c in cleaned.chars() {
+        if c == '-' || c.is_whitespace() {
+            if !prev_was_sep {
                 slug.push('-');
-                prev_was_hyphen = true;
+                prev_was_sep = true;
             }
+        } else {
+            slug.push(c);
+            prev_was_sep = false;
         }
     }
-    if slug.ends_with('-') {
-        slug.pop();
-    }
+    // Step 5: strip leading/trailing hyphens and underscores
+    // (matches .strip('-_'))
+    let slug = slug.trim_matches(|c: char| c == '-' || c == '_');
     Value::SafeString(slug.into())
 }
 
@@ -823,10 +838,21 @@ fn filter_length_is(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     Value::Bool(value_length(value) as i64 == target)
 }
 
-/// `random`: first item (no RNG dependency); deterministic fallback.
+/// `random`: pick a random element from the list. Delegates to Python's
+/// `random.choice` so that `random.seed()` in tests is respected.
 fn filter_random(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
     match value_to_list(value) {
-        Some(items) if !items.is_empty() => items[0].clone(),
+        Some(items) if !items.is_empty() => {
+            let idx = Python::attach(|py| -> usize {
+                let random = py.import("random").expect("random module");
+                let len = items.len();
+                random
+                    .call_method1("randrange", (len,))
+                    .and_then(|v| v.extract::<usize>())
+                    .unwrap_or(0)
+            });
+            items[idx.min(items.len() - 1)].clone()
+        }
         _ => Value::String(String::new()),
     }
 }
@@ -1933,8 +1959,7 @@ fn build_default_filters() -> HashMap<String, NativeFilter> {
     register!("ljust", filter_ljust, safe=true, autoescape=false, localtime=false);
     register!("lower", filter_lower, safe=true, autoescape=false, localtime=false);
     register!("rjust", filter_rjust, safe=true, autoescape=false, localtime=false);
-    // slugify NOT registered: Django uses `unicodedata.normalize('NFKD')`
-    // which we can't match without porting unicodedata.
+    register!("slugify", filter_slugify, safe=true, autoescape=false, localtime=false);
     register!("striptags", filter_striptags, safe=true, autoescape=false, localtime=false);
     register!("title", filter_title, safe=true, autoescape=false, localtime=false);
     register!("truncatechars", filter_truncatechars, safe=true, autoescape=false, localtime=false);
@@ -1956,11 +1981,10 @@ fn build_default_filters() -> HashMap<String, NativeFilter> {
     register!("last", filter_last, safe=true, autoescape=false, localtime=false);
     register!("length", filter_length, safe=false, autoescape=false, localtime=false);
     register!("length_is", filter_length_is, safe=false, autoescape=false, localtime=false);
-    // random NOT registered: Django's uses Python's `random.choice` so
-    // tests can `random.seed(...)`. Native RNG wouldn't observe the seed.
+    register!("random", filter_random, safe=false, autoescape=false, localtime=false);
     register!("slice", filter_slice, safe=true, autoescape=false, localtime=false);
-    // dictsort/dictsortreversed NOT registered: native impl doesn't
-    // match Django's dotted-key resolution (`dictsort:'a.b.c'`).
+    register!("dictsort", filter_dictsort, safe=false, autoescape=false, localtime=false);
+    register!("dictsortreversed", filter_dictsortreversed, safe=false, autoescape=false, localtime=false);
     register!("unordered_list", filter_unordered_list, safe=true, autoescape=true, localtime=false);
 
     register!("add", filter_add, safe=false, autoescape=false, localtime=false);
@@ -1985,11 +2009,10 @@ fn build_default_filters() -> HashMap<String, NativeFilter> {
     register!("json_script", filter_json_script, safe=true, autoescape=false, localtime=false);
     register!("make_list", filter_make_list, safe=false, autoescape=false, localtime=false);
     register!("phone2numeric", filter_phone2numeric, safe=true, autoescape=false, localtime=false);
-    // pprint NOT registered: native emits Rust Debug for Value::PyObject,
-    // which doesn't match Python's pprint.pformat.
+    register!("pprint", filter_pprint, safe=true, autoescape=false, localtime=false);
     register!("stringformat", filter_stringformat, safe=true, autoescape=false, localtime=false);
-    // truncatechars_html / truncatewords_html NOT registered: both
-    // require HTML tag balancing via Django's html.parser truncator.
+    register!("truncatechars_html", filter_truncatechars_html, safe=true, autoescape=false, localtime=false);
+    register!("truncatewords_html", filter_truncatewords_html, safe=true, autoescape=false, localtime=false);
 
     m
 }
