@@ -697,12 +697,57 @@ fn compile_extends(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
         )));
     }
 
-    let parent_name = parser.compile_filter(&bits[1])?;
+    let resolved = maybe_resolve_relative(parser, &bits[1]);
+    let parent_name = parser.compile_filter(&resolved)?;
     let nodelist = parser.parse(&[])?;
     Ok(Box::new(ExtendsNode::new(nodelist, parent_name)))
 }
 
-/// `{% include <name> [with key=val ...] [only] %}`. Mirrors `do_include`.
+fn construct_relative_path(current_template: Option<&str>, relative: &str) -> Option<String> {
+    if !relative.starts_with("./") && !relative.starts_with("../") {
+        return None;
+    }
+    let current = current_template?;
+    let dir = match current.rfind('/') {
+        Some(pos) => &current[..pos],
+        None => "",
+    };
+    let joined = if dir.is_empty() {
+        relative.to_owned()
+    } else {
+        format!("{}/{}", dir, relative)
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "." | "" => {}
+            ".." => {
+                if parts.is_empty() {
+                    return None;
+                }
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn maybe_resolve_relative(parser: &Parser, name: &str) -> String {
+    let unquoted = name.trim_matches(|c| c == '"' || c == '\'');
+    if !unquoted.starts_with("./") && !unquoted.starts_with("../") {
+        return name.to_owned();
+    }
+    let current = parser.origin.as_ref().and_then(|o| o.template_name.as_deref());
+    match construct_relative_path(current, unquoted) {
+        Some(resolved) => {
+            let q = &name[..1];
+            format!("{}{}{}", q, resolved, q)
+        }
+        None => name.to_owned(),
+    }
+}
+
 fn compile_include(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, TemplateError> {
     let bits = token.split_contents();
 
@@ -714,7 +759,8 @@ fn compile_include(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
         )));
     }
 
-    let template_name = parser.compile_filter(&bits[1])?;
+    let resolved_name = maybe_resolve_relative(parser, &bits[1]);
+    let template_name = parser.compile_filter(&resolved_name)?;
 
     let mut extra_context: Vec<(String, FilterExpression)> = Vec::new();
     let mut isolated_context = false;

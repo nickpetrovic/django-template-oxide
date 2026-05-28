@@ -99,9 +99,10 @@ impl Template {
         let _g_setup = crate::prof::Guard::new("compile_nodelist:setup");
         let mut parser = Parser::new(tokens);
         // Default to `Origin(UNKNOWN_SOURCE)` (base.py:151-152).
-        parser.origin = Some(crate::nodes::Origin::new(
-            name.unwrap_or(crate::nodes::UNKNOWN_SOURCE),
-        ));
+        let origin_name = name.unwrap_or(crate::nodes::UNKNOWN_SOURCE);
+        let mut origin = crate::nodes::Origin::new(origin_name);
+        origin.template_name = Some(origin.name.clone());
+        parser.origin = Some(origin);
         crate::tags::register_default_tags(&mut parser);
 
         Python::attach(|py| -> Result<(), TemplateError> {
