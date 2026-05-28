@@ -513,6 +513,14 @@ pub fn compile_blocktranslate(
                         let fe = parser.compile_filter(expr)?;
                         extra_context.push((name.to_owned(), fe));
                         i += 1;
+                    } else if i + 2 < bits.len() && bits[i + 1] == "as" {
+                        let fe = parser.compile_filter(&bits[i])?;
+                        let name = bits[i + 2].clone();
+                        extra_context.push((name, fe));
+                        i += 3;
+                        if i < bits.len() && bits[i] == "and" {
+                            i += 1;
+                        }
                     } else {
                         break;
                     }
@@ -529,13 +537,18 @@ pub fn compile_blocktranslate(
                 if let Some((name, expr)) = bits[i].split_once('=') {
                     countervar = Some(name.to_owned());
                     counter = Some(parser.compile_filter(expr)?);
+                    i += 1;
+                } else if i + 2 < bits.len() && bits[i + 1] == "as" {
+                    let fe = parser.compile_filter(&bits[i])?;
+                    countervar = Some(bits[i + 2].clone());
+                    counter = Some(fe);
+                    i += 3;
                 } else {
                     return Err(TemplateError::TemplateSyntaxError(format!(
                         "'{}' tag 'count' option requires a variable=expression.",
                         tag_name,
                     )));
                 }
-                i += 1;
             }
             "context" => {
                 if i + 1 >= bits.len() {
