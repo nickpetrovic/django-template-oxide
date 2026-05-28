@@ -57,7 +57,7 @@ python_files = ["test_*.py"]
 # against; the bench runs without it (rusty column is skipped) but
 # headline numbers ship with it.
 [dependency-groups]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "numpy", "jinja2"]
 # django-rusty-templates isn't on PyPI yet; install from the upstream
 # repo. See https://github.com/LilyFirefly/django-rusty-templates.
 bench = [

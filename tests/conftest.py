@@ -1,4 +1,9 @@
-"""Pytest conftest: configure Django for template engine tests."""
+"""Pytest conftest: configure Django for template engine tests.
+
+Monkey-patches Django's ``Template._render`` so every template render
+in the test suite goes through oxide's Rust engine. This ensures the
+upstream Django test suite validates oxide, not stock Django.
+"""
 
 import importlib
 import importlib.util
@@ -9,13 +14,7 @@ import django
 
 
 class _AliasImporter:
-    """Make ``import template_tests.X`` resolve to ``django_template_tests.X``.
-
-    Django's upstream tests reference ``template_tests.templatetags.custom``
-    etc. Our copy lives under ``django_template_tests``. This finder
-    transparently redirects any ``template_tests.*`` import to the real
-    package so both names work.
-    """
+    """Make ``import template_tests.X`` resolve to ``django_template_tests.X``."""
 
     _PREFIX = "template_tests"
     _REAL = "django_template_tests"
@@ -49,4 +48,52 @@ def pytest_configure():
     try:
         setup_test_environment()
     except RuntimeError:
-        pass  # Already called
+        pass
+
+    _patch_template_render()
+
+
+def _patch_template_render():
+    """Replace ``Template._render`` with an oxide-backed version.
+
+    Every ``Engine(...)`` in the upstream test suite creates stock Django
+    ``Template`` objects. By patching ``_render`` we route all rendering
+    through oxide's Rust engine while keeping Django's full infrastructure
+    (loaders, context processors, libraries) intact.
+    """
+    from django.template.base import Template as DjangoTemplate
+    from django_template_oxide._rust import (
+        Template as OxideTemplate,
+        Context as OxideContext,
+    )
+
+    _original_render = DjangoTemplate._render
+
+    def _oxide_render(self, context):
+        source = self.source
+        engine = getattr(self, "engine", None)
+        string_if_invalid = ""
+        if engine is not None:
+            string_if_invalid = getattr(engine, "string_if_invalid", "")
+
+        oxide_tpl = OxideTemplate(
+            source,
+            engine=engine,
+            name=getattr(self, "name", None),
+        )
+        flat = context.flatten()
+
+        request = getattr(context, "request", None)
+        if request is not None and "request" not in flat:
+            flat["request"] = request
+
+        oxide_ctx = OxideContext(
+            flat,
+            autoescape=context.autoescape,
+            use_l10n=getattr(context, "use_l10n", None),
+            use_tz=getattr(context, "use_tz", None),
+            string_if_invalid=string_if_invalid or None,
+        )
+        return oxide_tpl.render(oxide_ctx)
+
+    DjangoTemplate._render = _oxide_render
