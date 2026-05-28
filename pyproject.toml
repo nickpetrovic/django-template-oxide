@@ -1,0 +1,69 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "django-template-oxide"
+description = "A Rust implementation of Django's template engine."
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["django>=4.2"]
+# Version is read from Cargo.toml by maturin so we have a single source
+# of truth. Python users see it via `importlib.metadata.version(...)`.
+dynamic = ["version"]
+authors = [{ name = "Nick Petrovic" }]
+readme = "README.md"
+keywords = ["django", "template", "rust", "performance"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: Django",
+  "Framework :: Django :: 4.2",
+  "Framework :: Django :: 5.0",
+  "Framework :: Django :: 5.1",
+  "Framework :: Django :: 5.2",
+  "Framework :: Django :: 6.0",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Rust",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Repository = "https://github.com/nickpetrovic/django-template-oxide"
+Issues = "https://github.com/nickpetrovic/django-template-oxide/issues"
+Changelog = "https://github.com/nickpetrovic/django-template-oxide/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "django_template_oxide._rust"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+# Optional benchmark dependencies. Install with `uv sync --group bench`
+# (or `pip install -e ".[bench]"`) before running benches/bench.py.
+# `django-rusty-templates` is the headline competitor we compare
+# against; the bench runs without it (rusty column is skipped) but
+# headline numbers ship with it.
+[dependency-groups]
+dev = ["pytest>=7"]
+# django-rusty-templates isn't on PyPI yet; install from the upstream
+# repo. See https://github.com/LilyFirefly/django-rusty-templates.
+bench = [
+  "django-rusty-templates @ git+https://github.com/LilyFirefly/django-rusty-templates.git",
+]
+docs = [
+  "mkdocs>=1.6",
+  "mkdocs-material>=9.5",
+]

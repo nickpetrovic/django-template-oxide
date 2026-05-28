@@ -1,0 +1,41 @@
+[package]
+name = "django-template-oxide"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust implementation of Django's template engine, exposed as a Python extension via PyO3."
+license = "MIT"
+
+[lib]
+name = "django_template_oxide"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+# Enable per-call profiling instrumentation. When disabled (the default for
+# release builds), `prof::Guard::new(name)` compiles to a no-op zero-sized
+# struct, costing nothing at runtime. Build with `--features prof` to
+# re-enable when diagnosing performance.
+prof = []
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["py-clone"] }
+thiserror = "2"
+regex = "1"
+once_cell = "1"
+compact_str = "0.8"
+indexmap = "2"
+
+[dev-dependencies]
+pyo3 = { version = "0.28", features = ["auto-initialize", "py-clone"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Profile with: cargo build --profile profiling
+# Keeps debug symbols for samply/Instruments while staying fast.
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "full"

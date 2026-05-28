@@ -1,0 +1,49 @@
+site_name: django-template-oxide
+site_description: A Rust implementation of Django's template engine.
+site_url: https://nickpetrovic.github.io/django-template-oxide/
+repo_url: https://github.com/nickpetrovic/django-template-oxide
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Installing: install.md
+  - Using: usage.md
+  - Compatibility: compatibility.md
+  - Performance: performance.md
+  - Custom Tags & Filters: extending.md
+  - Limitations: limitations.md
+  - Contributing: contributing.md
+  - Changelog: changelog.md

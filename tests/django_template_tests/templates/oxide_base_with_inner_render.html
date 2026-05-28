@@ -1,0 +1,8 @@
+{% load custom %}
+<root>
+  before-inner
+  {% inner_template_render %}
+  after-inner
+  {% block content %}default-content{% endblock %}
+  after-content
+</root>
