@@ -173,31 +173,44 @@ fn load_template_source_and_engine<'py>(
     template_name: &str,
     context: &Context,
 ) -> Result<(String, Option<pyo3::Py<pyo3::PyAny>>), TemplateError> {
-    let map_tdne = |e: pyo3::PyErr| -> TemplateError {
-        let is_tdne = py
-            .import("django.template.exceptions")
-            .and_then(|m| m.getattr("TemplateDoesNotExist"))
+    let map_py_err = |e: pyo3::PyErr| -> TemplateError {
+        let exc_mod = py.import("django.template.exceptions");
+        let is_tdne = exc_mod
+            .as_ref()
+            .ok()
+            .and_then(|m| m.getattr("TemplateDoesNotExist").ok())
             .map(|cls| e.is_instance(py, &cls))
             .unwrap_or(false);
         if is_tdne {
-            TemplateError::TemplateDoesNotExist {
+            return TemplateError::TemplateDoesNotExist {
                 msg: template_name.to_owned(),
                 tried: vec![],
                 chain: vec![],
-            }
-        } else {
-            TemplateError::Internal(format!(
-                "Failed to load template '{}': {}",
-                template_name, e
-            ))
+            };
         }
+        let is_tse = exc_mod
+            .as_ref()
+            .ok()
+            .and_then(|m| m.getattr("TemplateSyntaxError").ok())
+            .map(|cls| e.is_instance(py, &cls))
+            .unwrap_or(false);
+        if is_tse {
+            let msg = e.value(py).str()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| format!("{}", e));
+            return TemplateError::TemplateSyntaxError(msg);
+        }
+        TemplateError::Internal(format!(
+            "Failed to load template '{}': {}",
+            template_name, e
+        ))
     };
 
     if let Some(ref engine_py) = context.engine {
         let engine_bound = engine_py.bind(py);
         let django_template = engine_bound
             .call_method1("get_template", (template_name,))
-            .map_err(map_tdne)?;
+            .map_err(map_py_err)?;
         let source: String = django_template
             .getattr("source")
             .and_then(|s| s.extract())
@@ -217,7 +230,7 @@ fn load_template_source_and_engine<'py>(
     })?;
     let django_template = loader
         .call_method1("get_template", (template_name,))
-        .map_err(map_tdne)?;
+        .map_err(map_py_err)?;
 
     let inner_template = django_template.getattr("template").map_err(|e| {
         TemplateError::Internal(format!(
@@ -400,7 +413,7 @@ impl Node for BlockNode {
             Some(b) => b.clone(),
             None => BlockNodeRef {
                 name: self.name.clone(),
-                nodelist: Arc::new(NodeList::new()),
+                nodelist: Arc::clone(&self.nodelist),
             },
         };
 
@@ -592,9 +605,12 @@ impl Node for IncludeNode {
         }
 
         if self.isolated_context {
-            // `only`: child sees only `extra` (plus builtins).
             let mut isolated = Context::new(Some(extra));
             isolated.autoescape = context.autoescape;
+            isolated.use_l10n = context.use_l10n;
+            isolated.use_tz = context.use_tz;
+            isolated.string_if_invalid = context.string_if_invalid.clone();
+            isolated.engine = context.engine.clone();
             let result = nodelist.render(py, &mut isolated)?;
             Ok(result.as_str().to_owned())
         } else if !extra.is_empty() {
