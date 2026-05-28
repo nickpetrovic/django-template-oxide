@@ -1410,15 +1410,12 @@ struct CsrfTokenNode {
 impl Node for CsrfTokenNode {
     fn render(&self, _py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         let csrf_token = match context.get("csrf_token") {
-            Some(v) if v.as_str().is_some() => v.as_str().unwrap().to_owned(),
-            Some(other) => other.to_string(),
-            // Django logs a warning here but doesn't error.
-            None => return Ok(String::new()),
+            Some(Value::String(s)) if !s.is_empty() && s != "NOTPROVIDED" => s.clone(),
+            Some(Value::SafeString(s)) if !s.is_empty() && s.as_ref() != "NOTPROVIDED" => {
+                s.as_ref().to_owned()
+            }
+            _ => return Ok(String::new()),
         };
-
-        if csrf_token == "NOTPROVIDED" {
-            return Ok(String::new());
-        }
 
         Ok(format!(
             r#"<input type="hidden" name="csrfmiddlewaretoken" value="{}">"#,

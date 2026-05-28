@@ -464,7 +464,8 @@ impl Node for VariableNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         if self.filter_expression.filters.is_empty() {
             let output = resolve_variable_rust(py, &self.filter_expression, context)?;
-            Ok(render_value_in_context(&output, context))
+            render_value_in_context_checked(&output, context)
+                .map_err(TemplateError::PythonError)
         } else {
             let output = resolve_with_filters_rust_cached(
                 py,
@@ -474,7 +475,8 @@ impl Node for VariableNode {
                 Some(&self.native_filter_ids),
                 Some(&self.filter_funcs),
             )?;
-            Ok(render_value_in_context(&output, context))
+            render_value_in_context_checked(&output, context)
+                .map_err(TemplateError::PythonError)
         }
     }
 
@@ -499,7 +501,13 @@ impl Node for VariableNode {
                 Some(&self.filter_funcs),
             )?
         };
-        render_value_in_context_into(&output, context, out);
+        if let Value::PyObject(_) = &output {
+            let rendered = render_value_in_context_checked(&output, context)
+                .map_err(TemplateError::PythonError)?;
+            out.push_str(&rendered);
+        } else {
+            render_value_in_context_into(&output, context, out);
+        }
         Ok(())
     }
 
@@ -1642,33 +1650,40 @@ fn resolve_with_filters_inner(
 /// routed through Django for `localize` / `template_localtime` /
 /// `conditional_escape` correctness.
 pub fn render_value_in_context(value: &Value, context: &Context) -> String {
+    match render_value_in_context_checked(value, context) {
+        Ok(s) => s,
+        Err(_) => String::new(),
+    }
+}
+
+pub fn render_value_in_context_checked(
+    value: &Value,
+    context: &Context,
+) -> Result<String, pyo3::PyErr> {
     let _g = crate::prof::Guard::new("render_value_in_context");
     if let Value::PyObject(obj) = value {
         return Python::attach(|py| {
             let py_obj = obj.bind(py);
             let dj = match crate::python_cache::django(py) {
                 Ok(d) => d,
-                Err(_) => return fallback_render_pyobject(py_obj, context.autoescape),
+                Err(_) => return fallback_render_pyobject_result(py_obj, context.autoescape),
             };
-            // Minimal py Context holding the render settings Django reads.
             let py_ctx = match dj.context_cls.bind(py).call0() {
                 Ok(c) => c,
-                Err(_) => return fallback_render_pyobject(py_obj, context.autoescape),
+                Err(_) => return fallback_render_pyobject_result(py_obj, context.autoescape),
             };
             let _ = py_ctx.setattr("autoescape", context.autoescape);
             let _ = py_ctx.setattr("use_l10n", context.use_l10n.unwrap_or(false));
             let _ = py_ctx.setattr("use_tz", context.use_tz.unwrap_or(false));
-            match dj.render_value_in_context.bind(py).call1((py_obj, &py_ctx)) {
-                Ok(result) => result
-                    .str()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| fallback_render_pyobject(py_obj, context.autoescape)),
-                Err(_) => fallback_render_pyobject(py_obj, context.autoescape),
-            }
+            dj.render_value_in_context
+                .bind(py)
+                .call1((py_obj, &py_ctx))?
+                .str()
+                .map(|s| s.to_string_lossy().into_owned())
         });
     }
 
-    if context.autoescape {
+    Ok(if context.autoescape {
         match value {
             Value::SafeString(s) => s.to_string(),
             Value::PyObject(_) => unreachable!(),
@@ -1676,20 +1691,21 @@ pub fn render_value_in_context(value: &Value, context: &Context) -> String {
         }
     } else {
         value.to_string()
-    }
+    })
 }
 
 /// Fallback when Django isn't importable: `str()` + optional escape.
-fn fallback_render_pyobject(py_obj: &pyo3::Bound<'_, pyo3::PyAny>, autoescape: bool) -> String {
-    let s = py_obj
-        .str()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+/// Propagates `__str__` exceptions instead of swallowing them.
+fn fallback_render_pyobject_result(
+    py_obj: &pyo3::Bound<'_, pyo3::PyAny>,
+    autoescape: bool,
+) -> Result<String, pyo3::PyErr> {
+    let s = py_obj.str()?.to_string_lossy().into_owned();
     let is_safe = py_obj.getattr("__html__").is_ok();
     if autoescape && !is_safe {
-        html_escape(&s)
+        Ok(html_escape(&s))
     } else {
-        s
+        Ok(s)
     }
 }
 

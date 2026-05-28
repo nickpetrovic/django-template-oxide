@@ -218,11 +218,6 @@ class TestAutoescapeFFI:
         assert "<script>" not in result
         assert "&lt;script&gt;" in result
 
-    @pytest.mark.xfail(
-        reason="Oxide silently swallows __str__ exceptions during variable "
-        "resolution instead of propagating them. Needs Rust-side fix.",
-        strict=False,
-    )
     def test_broken_str_propagates(self, engine, _engines):
         tpl = engine.from_string("{{ obj }}")
         with pytest.raises(ZeroDivisionError):
@@ -264,11 +259,6 @@ class TestCSRFToken:
         result = tpl.render({"csrf_token": '<script>"</script>'})
         assert "<script>" not in result
 
-    @pytest.mark.xfail(
-        reason="Oxide renders False as a token value instead of empty. "
-        "Stock Django returns empty for all falsy csrf_token values.",
-        strict=False,
-    )
     def test_false_renders_empty(self, engine, _engines):
         tpl = engine.from_string("{% csrf_token %}")
         assert tpl.render({"csrf_token": False}) == ""
