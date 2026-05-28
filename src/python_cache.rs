@@ -19,6 +19,8 @@ pub struct DjangoModules {
     pub context_cls: Py<PyAny>,
 
     pub template_syntax_error_cls: Py<PyAny>,
+    pub template_does_not_exist_cls: Py<PyAny>,
+    pub variable_does_not_exist_cls: Py<PyAny>,
 
     pub safestring: Py<PyAny>,
     pub mark_safe: Py<PyAny>,
@@ -37,6 +39,8 @@ impl DjangoModules {
         let ss = py.import("django.utils.safestring")?;
         let tr = py.import("django.utils.translation")?;
 
+        let variable_does_not_exist_cls = base.getattr("VariableDoesNotExist")?.unbind();
+
         Ok(Self {
             variable_cls: base.getattr("Variable")?.unbind(),
             variable_node_cls: base.getattr("VariableNode")?.unbind(),
@@ -49,6 +53,8 @@ impl DjangoModules {
             context_cls: ctx.getattr("Context")?.unbind(),
 
             template_syntax_error_cls: exc.getattr("TemplateSyntaxError")?.unbind(),
+            template_does_not_exist_cls: exc.getattr("TemplateDoesNotExist")?.unbind(),
+            variable_does_not_exist_cls,
 
             mark_safe: ss.getattr("mark_safe")?.unbind(),
             safe_data_cls: ss.getattr("SafeData")?.unbind(),

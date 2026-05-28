@@ -6,23 +6,22 @@ use pyo3::prelude::*;
 pyo3::create_exception!(
     django_template_oxide,
     TemplateSyntaxError,
-    pyo3::exceptions::PyException,
-    "Equivalent to django.template.exceptions.TemplateSyntaxError."
+    pyo3::exceptions::PyException
 );
 
 pyo3::create_exception!(
     django_template_oxide,
     VariableDoesNotExist,
-    pyo3::exceptions::PyException,
-    "Equivalent to django.template.base.VariableDoesNotExist."
+    pyo3::exceptions::PyException
 );
 
 pyo3::create_exception!(
     django_template_oxide,
     TemplateDoesNotExist,
-    pyo3::exceptions::PyException,
-    "Equivalent to django.template.exceptions.TemplateDoesNotExist."
+    pyo3::exceptions::PyException
 );
+
+
 
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
@@ -110,19 +109,46 @@ fn format_msg(msg: &str, params: &[String]) -> String {
 impl From<TemplateError> for PyErr {
     fn from(err: TemplateError) -> PyErr {
         match err {
-            TemplateError::VariableDoesNotExist { .. } => {
-                VariableDoesNotExist::new_err(err.to_string())
-            }
-            TemplateError::TemplateSyntaxError(msg) => {
-                TemplateSyntaxError::new_err(msg)
-            }
-            TemplateError::TemplateDoesNotExist { msg, .. } => {
-                TemplateDoesNotExist::new_err(msg)
-            }
             TemplateError::PythonError(e) => e,
             TemplateError::Internal(msg) => {
                 pyo3::exceptions::PyRuntimeError::new_err(msg)
             }
+            other => Python::attach(|py| {
+                match crate::python_cache::django(py) {
+                    Ok(dj) => {
+                        let (cls, msg) = match &other {
+                            TemplateError::VariableDoesNotExist { .. } => {
+                                (&dj.variable_does_not_exist_cls, other.to_string())
+                            }
+                            TemplateError::TemplateSyntaxError(m) => {
+                                (&dj.template_syntax_error_cls, m.clone())
+                            }
+                            TemplateError::TemplateDoesNotExist { msg, .. } => {
+                                (&dj.template_does_not_exist_cls, msg.clone())
+                            }
+                            _ => unreachable!(),
+                        };
+                        PyErr::from_value(
+                            cls.bind(py)
+                                .call1((msg,))
+                                .expect("failed to instantiate Django exception")
+                                .into_any(),
+                        )
+                    }
+                    Err(_) => match other {
+                        TemplateError::VariableDoesNotExist { .. } => {
+                            VariableDoesNotExist::new_err(other.to_string())
+                        }
+                        TemplateError::TemplateSyntaxError(msg) => {
+                            TemplateSyntaxError::new_err(msg)
+                        }
+                        TemplateError::TemplateDoesNotExist { msg, .. } => {
+                            TemplateDoesNotExist::new_err(msg)
+                        }
+                        _ => unreachable!(),
+                    },
+                }
+            }),
         }
     }
 }
