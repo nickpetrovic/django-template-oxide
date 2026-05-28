@@ -85,7 +85,7 @@ thread_local! {
     static EXTENDS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-const MAX_EXTENDS_DEPTH: u32 = 64;
+const MAX_EXTENDS_DEPTH: u32 = 256;
 
 /// Load + compile + cache via `django.template.loader.get_template`.
 /// Errors: `TemplateDoesNotExist` (not found), `TemplateSyntaxError`
@@ -100,21 +100,62 @@ fn load_template_nodelist(
         return Ok(nodelist);
     }
 
-    let (source, engine) = load_template_source_and_engine(py, template_name, context)?;
+    let (base_name, partial_name) = match template_name.split_once('#') {
+        Some((base, partial)) => (base, Some(partial)),
+        None => (template_name, None),
+    };
+
+    let (source, engine) = load_template_source_and_engine(py, base_name, context)?;
     let engine_bound = engine.as_ref().map(|e| e.bind(py));
     let nodelist = Template::compile_nodelist_with_engine(
         &source,
-        Some(template_name),
+        Some(base_name),
         false,
         engine_bound
             .as_ref()
             .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
     )?;
-    let rc = Arc::new(nodelist);
+
+    let rc = if let Some(pname) = partial_name {
+        extract_partial_arc(&nodelist, pname).ok_or_else(|| {
+            TemplateError::TemplateDoesNotExist {
+                msg: template_name.to_owned(),
+                tried: vec![],
+                chain: vec![],
+            }
+        })?
+    } else {
+        Arc::new(nodelist)
+    };
+
     TEMPLATE_CACHE.with_borrow_mut(|cache| {
         cache.insert(template_name.to_owned(), Arc::clone(&rc));
     });
     Ok(rc)
+}
+
+fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>> {
+    for entry in nodelist.iter_entries() {
+        if let crate::nodes::NodeEntry::Boxed(node) = entry {
+            if let Some(pdn) = node.as_any().downcast_ref::<super::PartialDefNode>() {
+                if pdn.name == name {
+                    return Some(Arc::clone(&pdn.nodelist));
+                }
+            }
+            node.walk_children(&mut |child_nl| {
+                // Already found -- skip. walk_children doesn't support
+                // early exit so we just let it run.
+            });
+            for child_name in node.child_nodelists() {
+                if let Some(child_nl) = node.get_child_nodelist(child_name) {
+                    if let Some(found) = extract_partial_arc(child_nl, name) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `(source, engine)` from `django.template.loader.get_template`. The
@@ -155,15 +196,9 @@ fn load_template_source_and_engine<'py>(
 
     if let Some(ref engine_py) = context.engine {
         let engine_bound = engine_py.bind(py);
-        let result = engine_bound
-            .call_method1("find_template", (template_name,))
+        let django_template = engine_bound
+            .call_method1("get_template", (template_name,))
             .map_err(map_tdne)?;
-        let django_template = result.get_item(0).map_err(|e| {
-            TemplateError::Internal(format!(
-                "find_template('{}') did not return a (template, origin) tuple: {}",
-                template_name, e
-            ))
-        })?;
         let source: String = django_template
             .getattr("source")
             .and_then(|s| s.extract())

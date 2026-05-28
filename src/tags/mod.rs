@@ -1647,10 +1647,10 @@ pub fn compile_ifchanged(
 // `parser.extra_data.setdefault("partials", {})`.
 
 #[derive(Debug)]
-struct PartialDefNode {
-    /// Whether the body also renders at the definition site.
+pub struct PartialDefNode {
+    pub name: String,
     inline: bool,
-    nodelist: std::sync::Arc<NodeList>,
+    pub nodelist: std::sync::Arc<NodeList>,
     token_field: Option<Token>,
     origin_field: Option<Origin>,
 }
@@ -1696,10 +1696,11 @@ pub fn compile_partialdef(
     let arc_nodelist = std::sync::Arc::new(nodelist);
 
     if let Ok(mut map) = parser.partials.lock() {
-        map.insert(name, std::sync::Arc::clone(&arc_nodelist));
+        map.insert(name.clone(), std::sync::Arc::clone(&arc_nodelist));
     }
 
     Ok(Box::new(PartialDefNode {
+        name,
         inline,
         nodelist: arc_nodelist,
         token_field: None,
