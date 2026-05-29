@@ -245,28 +245,28 @@ impl PyContext {
             Some(obj) if obj.is_none() => None,
             Some(obj) => {
                 let mut map = HashMap::new();
-                let items = if let Ok(d) = obj.cast::<PyDict>() {
-                    d.iter()
-                        .map(|(k, v)| (k.unbind(), v.unbind()))
-                        .collect::<Vec<_>>()
-                } else if let Ok(items_method) = obj.call_method0("items") {
-                    let mut out = Vec::new();
-                    for item in items_method.try_iter()? {
+                let py = obj.py();
+                let source = if let Ok(d) = obj.cast::<PyDict>() {
+                    d.clone().into_any()
+                } else if obj.hasattr("flatten")? {
+                    obj.call_method0("flatten")?
+                } else if obj.hasattr("items")? {
+                    let items = obj.call_method0("items")?;
+                    let d = PyDict::new(py);
+                    for item in items.try_iter()? {
                         let pair = item?;
-                        let k = pair.get_item(0)?;
-                        let v = pair.get_item(1)?;
-                        out.push((k.unbind(), v.unbind()));
+                        d.set_item(pair.get_item(0)?, pair.get_item(1)?)?;
                     }
-                    out
+                    d.into_any()
                 } else {
                     return Err(pyo3::exceptions::PyTypeError::new_err(
-                        "new() argument must be a dict or None",
+                        "Context.new() argument must be a dict, Context, or None",
                     ));
                 };
-                let py = obj.py();
-                for (k, v) in items {
-                    let key: String = k.bind(py).extract()?;
-                    map.insert(key, Value::from(&*v.bind(py)));
+                let pydict = source.cast::<PyDict>()?;
+                for (k, v) in pydict.iter() {
+                    let key: String = k.extract()?;
+                    map.insert(key, Value::from(&v));
                 }
                 Some(map)
             }

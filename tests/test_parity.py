@@ -167,6 +167,15 @@ class TestContextNew:
         child = ctx.new()
         assert child.get("a") is None
 
+    def test_new_with_context_object(self, engine, _engines):
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"a": 1})
+        values = OxideContext({"x": 10, "y": 20})
+        child = ctx.new(values)
+        assert child["x"] == 10
+        assert child["y"] == 20
+
 
 # =========================================================================
 # Phase 2: Context processors
