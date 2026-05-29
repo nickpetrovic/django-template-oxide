@@ -8,17 +8,18 @@ The behavioral compliance bar is byte-equal output with stock Django
 for any template the Django documentation guarantees. We run two
 test suites that hold us to this:
 
-1. **Oxide's own regression suite** (742 tests): compares
+1. **Oxide's own regression suite** (962 tests): compares
    `OxideTemplate(src).render(ctx)` against
    `django.template.Engine.from_string(src).render(Context(ctx))`
    byte-for-byte across every documented tag, filter, and edge case.
 
-2. **Django's own `tests/template_tests/`** (1541 tests): we clone
+2. **Django's own `tests/template_tests/`** (1514 tests): we clone
    Django at a tag, swap the `TEMPLATES` backend for oxide, run
-   Django's own template test suite. 1525 pass (99.0%).
+   Django's own template test suite. 1513 pass, 1 skipped, 0 failures.
 
-The 16 currently-failing Django tests are tracked as compliance
-gaps; see the [changelog](changelog.md) for the running list.
+No Django template test fails. The single skip is a
+case-insensitive-filesystem guard in `test_loaders`, not a
+compliance gap.
 
 ## Python versions
 

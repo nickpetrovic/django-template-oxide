@@ -16,9 +16,9 @@ unchanged.
 - Third-party libraries that monkey-patch `Lexer.tokenize`,
   including django-cotton.
 
-99% behavioral compliance verified against Django's own
-`tests/template_tests/` suite (1525 of 1541 tests pass against
-Django 6.0).
+Behavioral compliance verified against Django's own
+`tests/template_tests/` suite: 1513 of 1514 tests pass on Django 6.0
+(1 skipped on case-insensitive filesystems, 0 failures).
 
 ## What it's not
 
@@ -32,11 +32,11 @@ Django 6.0).
 
 | Workload                | Oxide    | django-rusty-templates | Stock Django |
 |-------------------------|----------|------------------------|--------------|
-| TEXT ONLY               | 0.004ms  | 0.009ms                | 0.016ms      |
-| VARS ONLY (3 attrs)     | 0.017ms  | 0.122ms                | 0.264ms      |
-| FULL TEMPLATE           | 0.096ms  | 0.680ms                | 1.327ms      |
-| INHERITANCE             | 0.016ms  | unsupported            | 0.303ms      |
-| Compile LARGE (500 rows)| 12.10ms  | 380ms                  | 44ms         |
+| TEXT ONLY               | 0.005ms  | 0.009ms                | 0.017ms      |
+| VARS ONLY (3 attrs)     | 0.018ms  | 0.124ms                | 0.276ms      |
+| FULL TEMPLATE           | 0.100ms  | 0.696ms                | 1.409ms      |
+| INHERITANCE             | 0.068ms  | unsupported            | 0.329ms      |
+| Compile LARGE (500 rows)| 7.85ms   | 390.59ms               | 46.06ms      |
 
 See [Performance](performance.md) for the full benchmark and how to
 reproduce it.

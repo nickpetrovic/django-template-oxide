@@ -25,7 +25,7 @@ Rust instead of Python. Everything you can do in Django templates,
 you can do here, including:
 
 - All built-in tags and filters (Django 6.0 compliance verified
-  against 1073 tests: 742 Python regression/compliance tests and
+  against 1293 tests: 962 Python regression/compliance tests and
   331 Rust unit tests).
 - Template inheritance: `{% extends %}` / `{% block %}` / `{% include %}`.
 - Custom Python tags / filters loaded via `{% load %}`.
@@ -74,20 +74,20 @@ scaling sweep) lives in `benches/bench.py`.
 
 | Workload                | Oxide    | Rusty       | Stock     |
 |-------------------------|----------|-------------|-----------|
-| TEXT ONLY               | 0.004ms  | 0.009ms     | 0.016ms   |
-| VARS ONLY (3 attrs)     | 0.017ms  | 0.123ms     | 0.260ms   |
-| FULL TEMPLATE           | 0.095ms  | 0.693ms     | 1.320ms   |
-| FILTER CHAIN (6-deep)   | 0.034ms  | unsupported | 0.611ms   |
-| WITH NESTED (4 levels)  | 0.108ms  | unsupported | 0.667ms   |
-| URL TAG                 | 0.436ms  | 0.464ms     | 0.634ms   |
-| INCLUDE LOOP            | 0.049ms  | unsupported | 0.411ms   |
-| INHERITANCE             | 0.067ms  | unsupported | 0.304ms   |
-| Compile SMALL (10 rows) | 0.175ms  | 0.186ms     | 0.803ms   |
-| Compile MEDIUM (100)    | 1.53ms   | 15.38ms     | 8.30ms    |
-| Compile LARGE (500)     | 7.48ms   | 378ms       | 43ms      |
+| TEXT ONLY               | 0.005ms  | 0.009ms     | 0.017ms   |
+| VARS ONLY (3 attrs)     | 0.018ms  | 0.124ms     | 0.276ms   |
+| FULL TEMPLATE           | 0.100ms  | 0.696ms     | 1.409ms   |
+| FILTER CHAIN (6-deep)   | 0.035ms  | unsupported | 0.626ms   |
+| WITH NESTED (4 levels)  | 0.115ms  | unsupported | 0.704ms   |
+| URL TAG                 | 0.465ms  | 0.477ms     | 0.664ms   |
+| INCLUDE LOOP            | 0.050ms  | unsupported | 0.431ms   |
+| INHERITANCE             | 0.068ms  | unsupported | 0.329ms   |
+| Compile SMALL (10 rows) | 0.171ms  | 0.190ms     | 0.805ms   |
+| Compile MEDIUM (100)    | 1.55ms   | 15.79ms     | 8.72ms    |
+| Compile LARGE (500)     | 7.85ms   | 390.59ms    | 46.06ms   |
 
 Oxide wins every render and compile workload, including small
-template compilation where it now beats rusty (0.175ms vs 0.186ms).
+template compilation where it now beats rusty (0.171ms vs 0.190ms).
 Compile time scales linearly while rusty grows superlinearly. See
 `benches/README.md` for methodology and how to reproduce.
 
@@ -127,11 +127,28 @@ Oxide went the other direction: ship 100% Django 6.0 compliance now,
 including third-party hooks like cotton's `Lexer.tokenize` patch,
 even if that means calling back into Python in places where rusty
 goes pure-Rust. We verify against Django's own
-`tests/template_tests/` suite (2454 of 2456 pass, 99.9%).
+`tests/template_tests/` suite (1513 of 1514 pass, 1 skipped on
+case-insensitive filesystems, 0 failures).
 
 When rusty reaches full compliance the comparison will be more
 meaningful. Today, the bench in this repo runs both and reports
 where rusty bails. Make your own call.
+
+## Testing
+
+Build the extension, then run the suites:
+
+```sh
+uv sync --group dev
+uvx maturin develop --release   # rebuild after any Rust change
+uv run pytest tests/            # 2476 Python tests (2474 pass, 2 skipped)
+cargo test                      # 331 Rust unit tests
+```
+
+The Python suite is 962 tests in oxide's own regression/compliance
+suite plus 1514 vendored Django `template_tests` routed through the
+oxide backend. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the
+breakdown.
 
 ## Contributing
 

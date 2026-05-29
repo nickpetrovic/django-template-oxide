@@ -15,13 +15,18 @@ That builds the Rust extension into your local venv. Re-run
 ## Test
 
 ```sh
-uv run --no-sync python -m pytest tests/test_regressions.py tests/test_basic_rendering.py tests/test_compliance.py tests/test_oxide_backend.py
+uv run pytest tests/
 ```
 
-742 Python tests, runs in under a second. Anything else under `tests/` is
-vendored Django infrastructure that won't run standalone.
+2476 Python tests: 962 in oxide's own regression/compliance suite
+(`test_regressions.py`, `test_compliance.py`, `test_basic_rendering.py`,
+`test_oxide_backend.py`, `test_parity.py`) plus 1514 vendored Django
+`template_tests` routed through the oxide backend. 2474 pass; 2 are
+skipped (a case-insensitive-filesystem guard in `test_loaders`, and an
+environment-dependent i18n compilation test that fails identically
+without oxide on Python 3.14).
 
-The Rust unit tests (331 tests) are run separately:
+The Rust unit tests (331) run separately:
 
 ```sh
 cargo test
@@ -73,11 +78,13 @@ python/django_template_oxide/
   _rust.so                Built Rust extension
 
 tests/
-  test_regressions.py        Bug-driven regression suite (530+ tests)
-  test_compliance.py         Django 6.0 behavioral compliance (200+ tests)
+  test_regressions.py        Bug-driven regression suite
+  test_compliance.py         Django 6.0 behavioral compliance
   test_basic_rendering.py    Smoke tests
   test_oxide_backend.py      Tests via the OxideTemplates backend path
-  django_template_tests/     Vendored Django template-tests fixtures
+  test_parity.py             Stock-Django parity for rendering entrypoints,
+                             context, filters, CSRF, lexer detection, etc.
+  django_template_tests/     Vendored Django template_tests (1514 tests)
 
 benches/
   bench.py                Comparison bench (oxide vs rusty vs stock)

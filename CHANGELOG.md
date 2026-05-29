@@ -6,6 +6,10 @@ follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 Until the first tagged release, everything lives under `Unreleased`.
 
+> **Status: pre-release work in progress.** No version has been tagged
+> yet. The Python API surface, behavior, and these notes may change
+> before the first release.
+
 ## Unreleased
 
 ### Added
@@ -29,9 +33,10 @@ Until the first tagged release, everything lives under `Unreleased`.
   `@register.simple_block_tag`, `@register.inclusion_tag`, and
   `@register.filter` all work through the standard `Library` API.
 - Cotton-style `Lexer.tokenize` monkey-patches honored.
-- Regression suite of 742 tests covering compliance, edge cases,
+- Regression suite of 962 tests covering compliance, edge cases,
   third-party compat patterns, and the public `OxideTemplates`
-  backend path.
+  backend path, plus 1514 vendored Django `template_tests` routed
+  through the oxide backend (1513 pass, 1 skipped, 0 failures).
 - Benchmark suite (`benches/bench.py`) comparing oxide against stock
   Django and `django-rusty-templates` across 22 render workloads, 3
   compile sizes, and a scaling sweep.
