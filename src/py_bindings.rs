@@ -239,6 +239,44 @@ impl PyContext {
         Ok(pydict.into_any().unbind())
     }
 
+    /// Expose flattened keys so this context behaves as a Python mapping
+    /// when embedded as a dict layer inside a Django `Context` (admin
+    /// inclusion tags do `Context(rust_context)`). `dict.update(self)`
+    /// and `dict(self)` then use the mapping protocol (`keys()` +
+    /// `__getitem__`) instead of iterating `__iter__` (which yields
+    /// dict layers, not key/value pairs).
+    fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let list = pyo3::types::PyList::empty(py);
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for d in &self.inner.base.dicts {
+            for k in d.keys() {
+                if seen.insert(k.as_str()) {
+                    list.append(k.as_str())?;
+                }
+            }
+        }
+        Ok(list.into_any().unbind())
+    }
+
+    /// Support `copy.copy(context)`. Django's test client snapshots the
+    /// context via `copy()` in its `template_rendered` signal handler
+    /// (`store_rendered_templates`) to populate `response.context`. The
+    /// full Rust context is cloned (dicts, autoescape, render_context,
+    /// engine binding), mirroring the independent snapshot Django's own
+    /// `Context.__copy__` produces.
+    fn __copy__(&self) -> PyContext {
+        PyContext {
+            inner: self.inner.clone(),
+        }
+    }
+
+    #[pyo3(signature = (_memo=None))]
+    fn __deepcopy__(&self, _memo: Option<&Bound<'_, PyAny>>) -> PyContext {
+        PyContext {
+            inner: self.inner.clone(),
+        }
+    }
+
     #[pyo3(signature = (values=None))]
     fn new_child(&self, values: Option<&Bound<'_, PyAny>>) -> PyResult<PyContext> {
         let dict = match values {

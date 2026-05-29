@@ -33,6 +33,7 @@ auto-escape rules, context-processor pipeline), the
 from django.template import TemplateDoesNotExist
 from django.template.backends.django import DjangoTemplates, copy_exception, reraise
 from django.template.context import make_context
+from django.utils.safestring import mark_safe
 
 try:
     from django.test.signals import template_rendered
@@ -221,7 +222,7 @@ class OxideTemplateAdapter:
                     context=DjContext(context or {}),
                 )
             try:
-                return self.template.render(context)
+                return mark_safe(self.template.render(context))
             except TemplateDoesNotExist as exc:
                 reraise(exc, self.backend)
 
@@ -245,8 +246,6 @@ class OxideTemplateAdapter:
             reraise(exc, self.backend)
 
     def _render_through_rust(self, dj_ctx):
-        # Flatten the Django Context dict stack (already includes
-        # context processors via bind_template).
         flat = dj_ctx.flatten()
         rust_ctx = _RustContext(
             flat,
@@ -255,7 +254,7 @@ class OxideTemplateAdapter:
             use_tz=getattr(dj_ctx, "use_tz", None),
             string_if_invalid=self.backend.engine.string_if_invalid or None,
         )
-        return self.template.render(rust_ctx)
+        return mark_safe(self.template.render(rust_ctx))
 
     @property
     def engine(self):

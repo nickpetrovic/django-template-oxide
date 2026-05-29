@@ -176,6 +176,128 @@ class TestContextNew:
         assert child["x"] == 10
         assert child["y"] == 20
 
+    def test_keys_returns_flattened_keys(self, _engines):
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"a": 1, "b": 2})
+        ctx.push({"c": 3})
+        assert set(ctx.keys()) == {"True", "False", "None", "a", "b", "c"}
+
+    def test_dict_update_uses_mapping_protocol(self, _engines):
+        # `dict.update(x)` uses the mapping protocol when `x` has a
+        # `keys()` method. Without keys() it iterates `__iter__` (which
+        # yields dict layers, not key/value pairs) and raises ValueError.
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"a": 1, "b": 2})
+        flat = {}
+        flat.update(ctx)
+        assert flat["a"] == 1
+        assert flat["b"] == 2
+
+    def test_django_context_wrapping_oxide_context_flattens(self, _engines):
+        # Reproduces the Django admin crash: inclusion tags like
+        # `submit_row`/`admin_actions` do `Context(context)` where
+        # `context` is our Rust Context, embedding it as a dict layer.
+        # `BaseContext.flatten()` then does `dict.update(oxide_ctx)`.
+        from django.template.context import Context as DjangoContext
+        from django_template_oxide._rust import Context as OxideContext
+
+        oxide_ctx = OxideContext({"add": True, "change": False})
+        wrapped = DjangoContext(oxide_ctx)
+        wrapped.update({"can_save": True})
+
+        flat = wrapped.flatten()
+        assert flat["add"] is True
+        assert flat["change"] is False
+        assert flat["can_save"] is True
+
+    def test_django_context_new_from_wrapped_oxide_context(self, _engines):
+        # Mirrors `InclusionNode.render`: the inclusion func returns a
+        # Django Context that embeds an oxide Context, then
+        # `context.new(that)` is called and the result is flattened.
+        from django.template.context import Context as DjangoContext
+        from django_template_oxide._rust import Context as OxideContext
+
+        oxide_ctx = OxideContext({"opts": "x", "add": True})
+        returned = DjangoContext(oxide_ctx)
+        returned.update({"show_save": True})
+
+        outer = DjangoContext({"base": 1})
+        new_context = outer.new(returned)
+        flat = new_context.flatten()
+        assert flat["add"] is True
+        assert flat["show_save"] is True
+
+    def test_oxide_context_getitem_and_contains_as_layer(self, _engines):
+        from django.template.context import Context as DjangoContext
+        from django_template_oxide._rust import Context as OxideContext
+
+        oxide_ctx = OxideContext({"add": True, "change": False})
+        wrapped = DjangoContext(oxide_ctx)
+        assert wrapped["add"] is True
+        assert "change" in wrapped
+        assert wrapped.get("missing", "default") == "default"
+
+    def test_copy_copy_returns_working_context(self, _engines):
+        # Django's test client snapshots the context with `copy.copy()`
+        # in its `template_rendered` signal handler to populate
+        # `response.context`. Without `__copy__`, this raises
+        # `TypeError: cannot pickle 'Context'` and 500s the response.
+        import copy as copy_mod
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"a": 1, "b": 2})
+        ctx.push({"c": 3})
+        dup = copy_mod.copy(ctx)
+
+        assert dup is not ctx
+        assert dup["a"] == 1
+        assert dup["c"] == 3
+        # Mutating the copy must not affect the original (independent snapshot).
+        dup["a"] = 99
+        assert ctx["a"] == 1
+
+    def test_copy_preserves_autoescape(self, _engines):
+        import copy as copy_mod
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"x": 1}, autoescape=False)
+        dup = copy_mod.copy(ctx)
+        assert dup.autoescape is False
+
+
+class TestRenderReturnType:
+    def test_oxide_render_returns_safe_string(self, _engines):
+        from django.utils.safestring import SafeData
+
+        oxide = _engines["oxide"]
+        tpl = oxide.from_string("<b>{{ name }}</b>")
+        result = tpl.render({"name": "test"})
+        assert isinstance(result, SafeData), (
+            f"oxide render() returned {type(result).__name__}, expected SafeString"
+        )
+
+    def test_oxide_render_not_double_escaped(self, _engines):
+        from django.utils.html import conditional_escape
+
+        oxide = _engines["oxide"]
+        tpl = oxide.from_string("<b>hello</b>")
+        result = tpl.render({})
+        escaped = conditional_escape(result)
+        assert escaped == "<b>hello</b>", (
+            f"conditional_escape double-escaped: {escaped!r}"
+        )
+
+    def test_oxide_render_nested_template_not_escaped(self, _engines):
+        oxide = _engines["oxide"]
+        inner = oxide.from_string("<em>inner</em>")
+        inner_result = inner.render({})
+        outer = oxide.from_string("{{ val }}")
+        result = outer.render({"val": inner_result})
+        assert "<em>inner</em>" in result
+        assert "&lt;em&gt;" not in result
+
 
 # =========================================================================
 # Phase 2: Context processors
