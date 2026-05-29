@@ -72,22 +72,23 @@ Django, items=50, iters=200, on an M-series laptop. Smaller numbers
 are better. The full bench (22 render cases, 3 compile sizes,
 scaling sweep) lives in `benches/bench.py`.
 
-| Workload                | Oxide    | Rusty     | Stock     |
-|-------------------------|----------|-----------|-----------|
-| TEXT ONLY               | 0.004ms  | 0.009ms   | 0.016ms   |
-| VARS ONLY (3 attrs)     | 0.017ms  | 0.122ms   | 0.264ms   |
-| FULL TEMPLATE           | 0.096ms  | 0.680ms   | 1.327ms   |
-| FILTER CHAIN (6-deep)   | 0.034ms  | unsupported | 0.609ms |
-| WITH NESTED (4 levels)  | 0.108ms  | unsupported | 0.669ms |
-| URL TAG                 | 0.435ms  | 0.472ms   | 0.638ms   |
-| INCLUDE LOOP            | 0.033ms  | unsupported | 0.404ms |
-| INHERITANCE             | 0.016ms  | unsupported | 0.303ms   |
-| Compile SMALL (10 rows) | 0.252ms  | 0.186ms   | 0.805ms   |
-| Compile MEDIUM (100)    | 2.39ms   | 15.51ms   | 8.29ms    |
-| Compile LARGE (500)     | 12.10ms  | 380ms     | 44ms      |
+| Workload                | Oxide    | Rusty       | Stock     |
+|-------------------------|----------|-------------|-----------|
+| TEXT ONLY               | 0.004ms  | 0.009ms     | 0.016ms   |
+| VARS ONLY (3 attrs)     | 0.017ms  | 0.123ms     | 0.260ms   |
+| FULL TEMPLATE           | 0.095ms  | 0.693ms     | 1.320ms   |
+| FILTER CHAIN (6-deep)   | 0.034ms  | unsupported | 0.611ms   |
+| WITH NESTED (4 levels)  | 0.108ms  | unsupported | 0.667ms   |
+| URL TAG                 | 0.436ms  | 0.464ms     | 0.634ms   |
+| INCLUDE LOOP            | 0.049ms  | unsupported | 0.411ms   |
+| INHERITANCE             | 0.067ms  | unsupported | 0.304ms   |
+| Compile SMALL (10 rows) | 0.175ms  | 0.186ms     | 0.803ms   |
+| Compile MEDIUM (100)    | 1.53ms   | 15.38ms     | 8.30ms    |
+| Compile LARGE (500)     | 7.48ms   | 378ms       | 43ms      |
 
-Oxide wins every render workload that rusty supports. Compile time
-scales linearly while rusty grows superlinearly. See
+Oxide wins every render and compile workload, including small
+template compilation where it now beats rusty (0.175ms vs 0.186ms).
+Compile time scales linearly while rusty grows superlinearly. See
 `benches/README.md` for methodology and how to reproduce.
 
 ## Compatibility
@@ -126,7 +127,7 @@ Oxide went the other direction: ship 100% Django 6.0 compliance now,
 including third-party hooks like cotton's `Lexer.tokenize` patch,
 even if that means calling back into Python in places where rusty
 goes pure-Rust. We verify against Django's own
-`tests/template_tests/` suite (1525 of 1541 pass).
+`tests/template_tests/` suite (2454 of 2456 pass, 99.9%).
 
 When rusty reaches full compliance the comparison will be more
 meaningful. Today, the bench in this repo runs both and reports

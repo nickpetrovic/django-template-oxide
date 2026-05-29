@@ -132,6 +132,43 @@ class TestRenderEntrypoints:
 
 
 # =========================================================================
+# Phase 1b: Context.new / new_child
+# =========================================================================
+
+
+class TestContextNew:
+    def test_new_with_dict(self, engine, _engines):
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"a": 1, "b": 2})
+        child = ctx.new({"c": 3})
+        assert child["c"] == 3
+
+    def test_new_with_none(self, engine, _engines):
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"a": 1})
+        child = ctx.new(None)
+        assert child.get("a") is None
+
+    def test_new_with_dict_subclass(self, engine, _engines):
+        from django_template_oxide._rust import Context as OxideContext
+        from collections import OrderedDict
+
+        ctx = OxideContext({"a": 1})
+        child = ctx.new(OrderedDict([("x", 10), ("y", 20)]))
+        assert child["x"] == 10
+        assert child["y"] == 20
+
+    def test_new_without_args(self, engine, _engines):
+        from django_template_oxide._rust import Context as OxideContext
+
+        ctx = OxideContext({"a": 1})
+        child = ctx.new()
+        assert child.get("a") is None
+
+
+# =========================================================================
 # Phase 2: Context processors
 # =========================================================================
 

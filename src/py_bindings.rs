@@ -240,13 +240,33 @@ impl PyContext {
     }
 
     #[pyo3(signature = (values=None))]
-    fn new_child(&self, values: Option<&Bound<'_, PyDict>>) -> PyResult<PyContext> {
+    fn new_child(&self, values: Option<&Bound<'_, PyAny>>) -> PyResult<PyContext> {
         let dict = match values {
-            Some(d) => {
+            Some(obj) if obj.is_none() => None,
+            Some(obj) => {
                 let mut map = HashMap::new();
-                for (k, v) in d.iter() {
-                    let key: String = k.extract()?;
-                    map.insert(key, Value::from(&v));
+                let items = if let Ok(d) = obj.cast::<PyDict>() {
+                    d.iter()
+                        .map(|(k, v)| (k.unbind(), v.unbind()))
+                        .collect::<Vec<_>>()
+                } else if let Ok(items_method) = obj.call_method0("items") {
+                    let mut out = Vec::new();
+                    for item in items_method.try_iter()? {
+                        let pair = item?;
+                        let k = pair.get_item(0)?;
+                        let v = pair.get_item(1)?;
+                        out.push((k.unbind(), v.unbind()));
+                    }
+                    out
+                } else {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(
+                        "new() argument must be a dict or None",
+                    ));
+                };
+                let py = obj.py();
+                for (k, v) in items {
+                    let key: String = k.bind(py).extract()?;
+                    map.insert(key, Value::from(&*v.bind(py)));
                 }
                 Some(map)
             }
@@ -257,10 +277,8 @@ impl PyContext {
         })
     }
 
-    /// Mirrors `Context.new`. Exposed as Python `.new` (since `#[new]`
-    /// reserves the Rust method name).
     #[pyo3(name = "new", signature = (values=None))]
-    fn py_new(&self, values: Option<&Bound<'_, PyDict>>) -> PyResult<PyContext> {
+    fn py_new(&self, values: Option<&Bound<'_, PyAny>>) -> PyResult<PyContext> {
         self.new_child(values)
     }
 
