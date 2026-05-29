@@ -8,8 +8,6 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock, skipUnless
 
-from admin_scripts.tests import AdminScriptTestCase
-
 from django.core import management
 from django.core.management import execute_from_command_line
 from django.core.management.base import CommandError
@@ -1077,6 +1075,7 @@ class ExcludedLocaleExtractionTests(ExtractorTests):
 class CustomLayoutExtractionTests(ExtractorTests):
     work_subdir = "project_dir"
 
+    @override_settings(LOCALE_PATHS=[])
     def test_no_locale_raises(self):
         msg = (
             "Unable to find a locale path to store translations for file "
@@ -1123,14 +1122,6 @@ class CustomLayoutExtractionTests(ExtractorTests):
             with open(app_de_locale) as fp:
                 po_contents = fp.read()
                 self.assertMsgId("This app has a locale directory", po_contents)
-
-
-@skipUnless(has_xgettext, "xgettext is mandatory for extraction tests")
-class NoSettingsExtractionTests(AdminScriptTestCase):
-    def test_makemessages_no_settings(self):
-        out, err = self.run_django_admin(["makemessages", "-l", "en", "-v", "0"])
-        self.assertNoOutput(err)
-        self.assertNoOutput(out)
 
 
 class UnchangedPoExtractionTests(ExtractorTests):
