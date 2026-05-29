@@ -25,7 +25,8 @@ Rust instead of Python. Everything you can do in Django templates,
 you can do here, including:
 
 - All built-in tags and filters (Django 6.0 compliance verified
-  against 742 regression tests).
+  against 1073 tests: 742 Python regression/compliance tests and
+  331 Rust unit tests).
 - Template inheritance: `{% extends %}` / `{% block %}` / `{% include %}`.
 - Custom Python tags / filters loaded via `{% load %}`.
 - i18n, static, cache, l10n, tz tag libraries.

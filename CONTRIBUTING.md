@@ -18,8 +18,14 @@ That builds the Rust extension into your local venv. Re-run
 uv run --no-sync python -m pytest tests/test_regressions.py tests/test_basic_rendering.py tests/test_compliance.py tests/test_oxide_backend.py
 ```
 
-742 tests, runs in under a second. Anything else under `tests/` is
+742 Python tests, runs in under a second. Anything else under `tests/` is
 vendored Django infrastructure that won't run standalone.
+
+The Rust unit tests (331 tests) are run separately:
+
+```sh
+cargo test
+```
 
 ## Bench
 

@@ -33,7 +33,11 @@ auto-escape rules, context-processor pipeline), the
 from django.template import TemplateDoesNotExist
 from django.template.backends.django import DjangoTemplates, copy_exception, reraise
 from django.template.context import make_context
-from django.test.signals import template_rendered
+
+try:
+    from django.test.signals import template_rendered
+except ImportError:
+    template_rendered = None
 
 from django_template_oxide._rust import Template as _RustTemplate, Context as _RustContext
 
@@ -210,7 +214,7 @@ class OxideTemplateAdapter:
         # its own per-render `RenderContext::push_state`; see
         # context.rs RenderContext.
         if request is None and (context is None or type(context) is dict):
-            if template_rendered.receivers:
+            if template_rendered is not None and template_rendered.receivers:
                 from django.template import Context as DjContext
                 template_rendered.send(
                     sender=self, template=self,
@@ -226,7 +230,8 @@ class OxideTemplateAdapter:
             context, request, autoescape=self.backend.engine.autoescape
         )
 
-        template_rendered.send(sender=self, template=self, context=dj_ctx)
+        if template_rendered is not None:
+            template_rendered.send(sender=self, template=self, context=dj_ctx)
 
         try:
             with dj_ctx.render_context.push_state(self):
