@@ -52,14 +52,12 @@ fn value_to_string(v: &Value) -> String {
             out
         }
         Value::Dict(_) => format!("{v}"),
-        Value::PyObject(obj) => {
-            Python::attach(|py| {
-                obj.bind(py)
-                    .str()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            })
-        }
+        Value::PyObject(obj) => Python::attach(|py| {
+            obj.bind(py)
+                .str()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }),
     }
 }
 
@@ -69,31 +67,6 @@ fn value_as_str_cow(v: &Value) -> Cow<'_, str> {
     match v.as_str() {
         Some(s) => Cow::Borrowed(s),
         None => Cow::Owned(value_to_string(v)),
-    }
-}
-
-/// `value_to_string` plus a SafeData flag, for autoescape handling of
-/// PyObject values.
-fn value_to_string_with_safety(v: &Value) -> (String, bool) {
-    match v {
-        Value::SafeString(s) => (s.to_string(), true),
-        Value::PyObject(obj) => {
-            Python::attach(|py| {
-                match obj.bind(py).str() {
-                    Ok(s) => {
-                        let text = s.to_string_lossy().into_owned();
-                        let is_safe = py
-                            .import("django.utils.safestring")
-                            .and_then(|m| m.getattr("SafeData"))
-                            .and_then(|cls| s.is_instance(&cls))
-                            .unwrap_or(false);
-                        (text, is_safe)
-                    }
-                    Err(_) => (String::new(), false),
-                }
-            })
-        }
-        _ => (value_to_string(v), false),
     }
 }
 
@@ -118,9 +91,7 @@ fn is_truthy(v: &Value) -> bool {
         Value::SafeString(s) => !s.is_empty(),
         Value::List(items) => !items.is_empty(),
         Value::Dict(map) => !map.is_empty(),
-        Value::PyObject(obj) => pyo3::Python::attach(|py| {
-            obj.bind(py).is_truthy().unwrap_or(true)
-        }),
+        Value::PyObject(obj) => pyo3::Python::attach(|py| obj.bind(py).is_truthy().unwrap_or(true)),
     }
 }
 
@@ -147,7 +118,9 @@ fn arg_as_string(args: &[Value], default: &str) -> String {
 
 /// Get the first filter argument as an i64, or return a default.
 fn arg_as_i64(args: &[Value], default: i64) -> i64 {
-    args.first().and_then(|a| coerce_to_i64(a)).unwrap_or(default)
+    args.first()
+        .and_then(|a| coerce_to_i64(a))
+        .unwrap_or(default)
 }
 
 /// Try to coerce a `Value` to i64.
@@ -181,9 +154,7 @@ fn value_length(v: &Value) -> usize {
         Value::PyObject(obj) => {
             // Delegate to Python's `len()` for lazy collections (lists,
             // tuples, dicts, sets, custom containers).
-            Python::attach(|py| {
-                obj.bind(py).len().unwrap_or(0)
-            })
+            Python::attach(|py| obj.bind(py).len().unwrap_or(0))
         }
         _ => 0,
     }
@@ -685,14 +656,12 @@ fn filter_urlizetrunc(value: &Value, args: &[Value], autoescape: bool) -> Value 
     call_django_urlize("urlizetrunc", value, args, autoescape)
 }
 
-fn call_django_urlize(
-    filter_name: &str,
-    value: &Value,
-    args: &[Value],
-    autoescape: bool,
-) -> Value {
+fn call_django_urlize(filter_name: &str, value: &Value, args: &[Value], autoescape: bool) -> Value {
     Python::attach(|py| {
-        let module = match py.import(pyo3::types::PyString::new(py, "django.template.defaultfilters")) {
+        let module = match py.import(pyo3::types::PyString::new(
+            py,
+            "django.template.defaultfilters",
+        )) {
             Ok(m) => m,
             Err(_) => return value.clone(),
         };
@@ -732,19 +701,22 @@ fn call_django_urlize(
 /// `first`: first item of a list or first char of a string.
 fn filter_first(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
     if let Some(s) = value.as_str() {
-        return s.chars().next().map_or(Value::String(String::new()), |c| Value::String(c.to_string()));
+        return s.chars().next().map_or(Value::String(String::new()), |c| {
+            Value::String(c.to_string())
+        });
     }
     match value {
-        Value::List(items) => items.first().cloned().unwrap_or(Value::String(String::new())),
-        Value::PyObject(obj) => {
-            Python::attach(|py| {
-                obj.bind(py)
-                    .get_item(0)
-                    .ok()
-                    .map(|v| Value::from(&v))
-                    .unwrap_or_else(|| Value::String(String::new()))
-            })
-        }
+        Value::List(items) => items
+            .first()
+            .cloned()
+            .unwrap_or(Value::String(String::new())),
+        Value::PyObject(obj) => Python::attach(|py| {
+            obj.bind(py)
+                .get_item(0)
+                .ok()
+                .map(|v| Value::from(&v))
+                .unwrap_or_else(|| Value::String(String::new()))
+        }),
         _ => Value::String(String::new()),
     }
 }
@@ -763,22 +735,20 @@ fn filter_join(value: &Value, args: &[Value], autoescape: bool) -> Value {
 
     let items: Option<Vec<Value>> = match value {
         Value::List(items) => Some(items.clone()),
-        Value::PyObject(obj) => {
-            Python::attach(|py| {
-                let bound = obj.bind(py);
-                if let Ok(iter) = bound.try_iter() {
-                    let mut result = Vec::new();
-                    for item in iter {
-                        if let Ok(v) = item {
-                            result.push(Value::from(&v));
-                        }
+        Value::PyObject(obj) => Python::attach(|py| {
+            let bound = obj.bind(py);
+            if let Ok(iter) = bound.try_iter() {
+                let mut result = Vec::new();
+                for item in iter {
+                    if let Ok(v) = item {
+                        result.push(Value::from(&v));
                     }
-                    Some(result)
-                } else {
-                    None
                 }
-            })
-        }
+                Some(result)
+            } else {
+                None
+            }
+        }),
         _ => None,
     };
 
@@ -805,24 +775,30 @@ fn filter_join(value: &Value, args: &[Value], autoescape: bool) -> Value {
 /// `last`: last item of a list.
 fn filter_last(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
     if let Some(s) = value.as_str() {
-        return s.chars().next_back().map_or(Value::String(String::new()), |c| Value::String(c.to_string()));
+        return s
+            .chars()
+            .next_back()
+            .map_or(Value::String(String::new()), |c| {
+                Value::String(c.to_string())
+            });
     }
     match value {
-        Value::List(items) => items.last().cloned().unwrap_or(Value::String(String::new())),
-        Value::PyObject(obj) => {
-            Python::attach(|py| {
-                let bound = obj.bind(py);
-                let len = match bound.len() {
-                    Ok(n) if n > 0 => n,
-                    _ => return Value::String(String::new()),
-                };
-                bound
-                    .get_item(len - 1)
-                    .ok()
-                    .map(|v| Value::from(&v))
-                    .unwrap_or_else(|| Value::String(String::new()))
-            })
-        }
+        Value::List(items) => items
+            .last()
+            .cloned()
+            .unwrap_or(Value::String(String::new())),
+        Value::PyObject(obj) => Python::attach(|py| {
+            let bound = obj.bind(py);
+            let len = match bound.len() {
+                Ok(n) if n > 0 => n,
+                _ => return Value::String(String::new()),
+            };
+            bound
+                .get_item(len - 1)
+                .ok()
+                .map(|v| Value::from(&v))
+                .unwrap_or_else(|| Value::String(String::new()))
+        }),
         _ => Value::String(String::new()),
     }
 }
@@ -892,13 +868,7 @@ fn filter_slice(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     let step = explicit_step.unwrap_or(1);
     let step = if step == 0 { 1 } else { step };
 
-    let clamp_pos = |v: i64| -> i64 {
-        if v < 0 {
-            (len + v).max(0)
-        } else {
-            v.min(len)
-        }
-    };
+    let clamp_pos = |v: i64| -> i64 { if v < 0 { (len + v).max(0) } else { v.min(len) } };
     let clamp_neg = |v: i64| -> i64 {
         // Negative step: indices walk downward to -1 as terminator.
         let v = if v < 0 { len + v } else { v };
@@ -958,8 +928,14 @@ fn filter_dictsortreversed(value: &Value, args: &[Value], _autoescape: bool) -> 
 
 fn _dictsort_via_python(value: &Value, args: &[Value], reversed: bool) -> Value {
     Python::attach(|py| {
-        let filters = py.import("django.template.defaultfilters").expect("defaultfilters");
-        let func_name = if reversed { "dictsortreversed" } else { "dictsort" };
+        let filters = py
+            .import("django.template.defaultfilters")
+            .expect("defaultfilters");
+        let func_name = if reversed {
+            "dictsortreversed"
+        } else {
+            "dictsort"
+        };
         let py_val = value.to_pyobject(py);
         let py_arg = if args.is_empty() {
             "".into_pyobject(py).expect("str").into_any().unbind()
@@ -971,37 +947,6 @@ fn _dictsort_via_python(value: &Value, args: &[Value], reversed: bool) -> Value 
             Err(_) => value.clone(),
         }
     })
-}
-
-/// Get a value from a dict by dotted key path.
-fn dict_get_dotted(v: &Value, key: &str) -> Value {
-    let mut current = v.clone();
-    for part in key.split('.') {
-        match &current {
-            Value::Dict(map) => {
-                current = map.get(part).cloned().unwrap_or(Value::None);
-            }
-            _ => return Value::None,
-        }
-    }
-    current
-}
-
-/// Compare two `Value`s for ordering. Strings compare by str contents.
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
-    if let (Some(a_s), Some(b_s)) = (a.as_str(), b.as_str()) {
-        return a_s.cmp(b_s);
-    }
-    match (a, b) {
-        (Value::Int(a), Value::Int(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        _ => {
-            let a_s = value_to_string(a);
-            let b_s = value_to_string(b);
-            a_s.cmp(&b_s)
-        }
-    }
 }
 
 /// `unordered_list`: nested list -> HTML `<li>` items (no outer `<ul>`).
@@ -1027,7 +972,9 @@ fn filter_unordered_list(value: &Value, _args: &[Value], autoescape: bool) -> Va
             let item = &items[i];
             if let Some(sub) = as_sublist(item) {
                 let child = render_items(&sub, indent + 1, autoescape);
-                lines.push(format!("{tabs}<li>\n{tabs}<ul>\n{child}\n{tabs}</ul>\n{tabs}</li>"));
+                lines.push(format!(
+                    "{tabs}<li>\n{tabs}<ul>\n{child}\n{tabs}</ul>\n{tabs}</li>"
+                ));
                 i += 1;
             } else {
                 let s = value_to_string(item);
@@ -1290,13 +1237,9 @@ fn filter_pluralize(value: &Value, args: &[Value], _autoescape: bool) -> Value {
         Value::SafeString(s) => s.parse::<i64>().unwrap_or(0),
         // Sequences pluralize by `len(value)`; without this,
         // `{{ qs|pluralize }}` always returns plural.
-        Value::PyObject(obj) => pyo3::Python::attach(|py| {
-            obj.bind(py)
-                .len()
-                .ok()
-                .map(|n| n as i64)
-                .unwrap_or(0)
-        }),
+        Value::PyObject(obj) => {
+            pyo3::Python::attach(|py| obj.bind(py).len().ok().map(|n| n as i64).unwrap_or(0))
+        }
         _ => 0,
     };
 
@@ -1314,14 +1257,19 @@ fn filter_default(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     if is_truthy(value) {
         value.clone()
     } else {
-        args.first().cloned().unwrap_or(Value::String(String::new()))
+        args.first()
+            .cloned()
+            .unwrap_or(Value::String(String::new()))
     }
 }
 
 /// `default_if_none`: arg if value is None.
 fn filter_default_if_none(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     match value {
-        Value::None => args.first().cloned().unwrap_or(Value::String(String::new())),
+        Value::None => args
+            .first()
+            .cloned()
+            .unwrap_or(Value::String(String::new())),
         _ => value.clone(),
     }
 }
@@ -1391,9 +1339,9 @@ fn cached_django_callable(
     module_path: &'static str,
     func_name: &'static str,
 ) -> Option<Py<PyAny>> {
+    use once_cell::sync::Lazy;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use once_cell::sync::Lazy;
 
     static CACHE: Lazy<Mutex<HashMap<(usize, usize), Py<PyAny>>>> =
         Lazy::new(|| Mutex::new(HashMap::new()));
@@ -1434,12 +1382,7 @@ fn filter_date(value: &Value, args: &[Value], _autoescape: bool) -> Value {
             Some(v) if v.as_str().is_some() => Cow::Borrowed(v.as_str().unwrap()),
             Some(other) => Cow::Owned(other.to_string()),
             None => {
-                return call_django_filter(
-                    "django.template.defaultfilters",
-                    "date",
-                    value,
-                    args,
-                );
+                return call_django_filter("django.template.defaultfilters", "date", value, args);
             }
         };
 
@@ -1484,12 +1427,22 @@ fn filter_time(value: &Value, args: &[Value], _autoescape: bool) -> Value {
 
 /// `timesince`: delegates to `defaultfilters.timesince_filter`.
 fn filter_timesince(value: &Value, args: &[Value], _autoescape: bool) -> Value {
-    call_django_filter("django.template.defaultfilters", "timesince_filter", value, args)
+    call_django_filter(
+        "django.template.defaultfilters",
+        "timesince_filter",
+        value,
+        args,
+    )
 }
 
 /// `timeuntil`: delegates to `defaultfilters.timeuntil_filter`.
 fn filter_timeuntil(value: &Value, args: &[Value], _autoescape: bool) -> Value {
-    call_django_filter("django.template.defaultfilters", "timeuntil_filter", value, args)
+    call_django_filter(
+        "django.template.defaultfilters",
+        "timeuntil_filter",
+        value,
+        args,
+    )
 }
 
 // Encoding filters
@@ -1547,9 +1500,7 @@ fn filter_json_script(value: &Value, args: &[Value], _autoescape: bool) -> Value
         Some(id) if !id.is_empty() => format!(" id=\"{}\"", html_escape(id)),
         _ => String::new(),
     };
-    let out = format!(
-        "<script{id_attr} type=\"application/json\">{safe_json}</script>"
-    );
+    let out = format!("<script{id_attr} type=\"application/json\">{safe_json}</script>");
     Value::SafeString(out.into())
 }
 
@@ -1603,7 +1554,10 @@ fn value_to_json(v: &Value) -> String {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&format!("\"{}\"", k.replace('\\', "\\\\").replace('"', "\\\"")));
+                out.push_str(&format!(
+                    "\"{}\"",
+                    k.replace('\\', "\\\\").replace('"', "\\\"")
+                ));
                 out.push_str(": ");
                 out.push_str(&value_to_json(v));
             }
@@ -1618,7 +1572,9 @@ fn value_to_json(v: &Value) -> String {
                 let mut out = String::from("{");
                 let mut first = true;
                 for (k, v) in d.iter() {
-                    if !first { out.push_str(", "); }
+                    if !first {
+                        out.push_str(", ");
+                    }
                     first = false;
                     let key_str = k.extract::<String>().unwrap_or_default();
                     out.push_str(&format!(
@@ -1634,7 +1590,9 @@ fn value_to_json(v: &Value) -> String {
             } else if let Ok(list) = bound.cast::<PyList>() {
                 let mut out = String::from("[");
                 for (i, item) in list.iter().enumerate() {
-                    if i > 0 { out.push_str(", "); }
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
                     let item_val = Value::from(&item);
                     out.push_str(&value_to_json(&item_val));
                 }
@@ -1643,7 +1601,9 @@ fn value_to_json(v: &Value) -> String {
             } else if let Ok(tup) = bound.cast::<PyTuple>() {
                 let mut out = String::from("[");
                 for (i, item) in tup.iter().enumerate() {
-                    if i > 0 { out.push_str(", "); }
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
                     let item_val = Value::from(&item);
                     out.push_str(&value_to_json(&item_val));
                 }
@@ -1778,7 +1738,9 @@ fn filter_truncatewords_html(value: &Value, args: &[Value], _autoescape: bool) -
 
 fn _truncate_html_via_python(value: &Value, args: &[Value], func_name: &str) -> Value {
     Python::attach(|py| {
-        let filters = py.import("django.template.defaultfilters").expect("defaultfilters");
+        let filters = py
+            .import("django.template.defaultfilters")
+            .expect("defaultfilters");
         let py_val = value.to_pyobject(py);
         let py_arg = if args.is_empty() {
             0i64.into_pyobject(py).expect("int").into_any().unbind()
@@ -1961,75 +1923,417 @@ fn build_default_filters() -> HashMap<String, NativeFilter> {
         };
         // Short form: safe=false, autoescape=false, localtime=false.
         ($name:expr, $func:expr) => {
-            register!($name, $func, safe=false, autoescape=false, localtime=false);
+            register!(
+                $name,
+                $func,
+                safe = false,
+                autoescape = false,
+                localtime = false
+            );
         };
     }
 
     // is_safe flags match django.template.defaultfilters exactly.
-    register!("addslashes", filter_addslashes, safe=true, autoescape=false, localtime=false);
-    register!("capfirst", filter_capfirst, safe=true, autoescape=false, localtime=false);
-    register!("center", filter_center, safe=true, autoescape=false, localtime=false);
+    register!(
+        "addslashes",
+        filter_addslashes,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "capfirst",
+        filter_capfirst,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "center",
+        filter_center,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
     register!("cut", filter_cut);
-    register!("escape", filter_escape, safe=true, autoescape=false, localtime=false);
-    register!("escapejs", filter_escapejs, safe=true, autoescape=false, localtime=false);
-    register!("force_escape", filter_force_escape, safe=true, autoescape=false, localtime=false);
-    register!("ljust", filter_ljust, safe=true, autoescape=false, localtime=false);
-    register!("lower", filter_lower, safe=true, autoescape=false, localtime=false);
-    register!("rjust", filter_rjust, safe=true, autoescape=false, localtime=false);
-    register!("slugify", filter_slugify, safe=true, autoescape=false, localtime=false);
-    register!("striptags", filter_striptags, safe=true, autoescape=false, localtime=false);
-    register!("title", filter_title, safe=true, autoescape=false, localtime=false);
-    register!("truncatechars", filter_truncatechars, safe=true, autoescape=false, localtime=false);
-    register!("truncatewords", filter_truncatewords, safe=true, autoescape=false, localtime=false);
-    register!("upper", filter_upper, safe=false, autoescape=false, localtime=false);
-    register!("wordcount", filter_wordcount, safe=false, autoescape=false, localtime=false);
-    register!("wordwrap", filter_wordwrap, safe=true, autoescape=false, localtime=false);
+    register!(
+        "escape",
+        filter_escape,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "escapejs",
+        filter_escapejs,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "force_escape",
+        filter_force_escape,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "ljust",
+        filter_ljust,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "lower",
+        filter_lower,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "rjust",
+        filter_rjust,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "slugify",
+        filter_slugify,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "striptags",
+        filter_striptags,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "title",
+        filter_title,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "truncatechars",
+        filter_truncatechars,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "truncatewords",
+        filter_truncatewords,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "upper",
+        filter_upper,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "wordcount",
+        filter_wordcount,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "wordwrap",
+        filter_wordwrap,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
 
-    register!("linebreaks", filter_linebreaks, safe=true, autoescape=true, localtime=false);
-    register!("linebreaksbr", filter_linebreaksbr, safe=true, autoescape=true, localtime=false);
-    register!("linenumbers", filter_linenumbers, safe=true, autoescape=true, localtime=false);
-    register!("safe", filter_safe, safe=true, autoescape=false, localtime=false);
-    register!("safeseq", filter_safeseq, safe=true, autoescape=false, localtime=false);
-    register!("urlize", filter_urlize, safe=true, autoescape=true, localtime=false);
-    register!("urlizetrunc", filter_urlizetrunc, safe=true, autoescape=true, localtime=false);
+    register!(
+        "linebreaks",
+        filter_linebreaks,
+        safe = true,
+        autoescape = true,
+        localtime = false
+    );
+    register!(
+        "linebreaksbr",
+        filter_linebreaksbr,
+        safe = true,
+        autoescape = true,
+        localtime = false
+    );
+    register!(
+        "linenumbers",
+        filter_linenumbers,
+        safe = true,
+        autoescape = true,
+        localtime = false
+    );
+    register!(
+        "safe",
+        filter_safe,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "safeseq",
+        filter_safeseq,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "urlize",
+        filter_urlize,
+        safe = true,
+        autoescape = true,
+        localtime = false
+    );
+    register!(
+        "urlizetrunc",
+        filter_urlizetrunc,
+        safe = true,
+        autoescape = true,
+        localtime = false
+    );
 
-    register!("first", filter_first, safe=false, autoescape=false, localtime=false);
-    register!("join", filter_join, safe=true, autoescape=true, localtime=false);
-    register!("last", filter_last, safe=true, autoescape=false, localtime=false);
-    register!("length", filter_length, safe=false, autoescape=false, localtime=false);
-    register!("length_is", filter_length_is, safe=false, autoescape=false, localtime=false);
-    register!("random", filter_random, safe=false, autoescape=false, localtime=false);
-    register!("slice", filter_slice, safe=true, autoescape=false, localtime=false);
-    register!("dictsort", filter_dictsort, safe=false, autoescape=false, localtime=false);
-    register!("dictsortreversed", filter_dictsortreversed, safe=false, autoescape=false, localtime=false);
-    register!("unordered_list", filter_unordered_list, safe=true, autoescape=true, localtime=false);
+    register!(
+        "first",
+        filter_first,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "join",
+        filter_join,
+        safe = true,
+        autoescape = true,
+        localtime = false
+    );
+    register!(
+        "last",
+        filter_last,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "length",
+        filter_length,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "length_is",
+        filter_length_is,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "random",
+        filter_random,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "slice",
+        filter_slice,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "dictsort",
+        filter_dictsort,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "dictsortreversed",
+        filter_dictsortreversed,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "unordered_list",
+        filter_unordered_list,
+        safe = true,
+        autoescape = true,
+        localtime = false
+    );
 
-    register!("add", filter_add, safe=false, autoescape=false, localtime=false);
-    register!("divisibleby", filter_divisibleby, safe=false, autoescape=false, localtime=false);
-    register!("filesizeformat", filter_filesizeformat, safe=true, autoescape=false, localtime=false);
-    register!("floatformat", filter_floatformat, safe=true, autoescape=false, localtime=false);
-    register!("get_digit", filter_get_digit, safe=false, autoescape=false, localtime=false);
-    register!("pluralize", filter_pluralize, safe=false, autoescape=false, localtime=false);
+    register!(
+        "add",
+        filter_add,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "divisibleby",
+        filter_divisibleby,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "filesizeformat",
+        filter_filesizeformat,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "floatformat",
+        filter_floatformat,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "get_digit",
+        filter_get_digit,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "pluralize",
+        filter_pluralize,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
 
-    register!("default", filter_default, safe=false, autoescape=false, localtime=false);
-    register!("default_if_none", filter_default_if_none, safe=false, autoescape=false, localtime=false);
-    register!("yesno", filter_yesno, safe=false, autoescape=false, localtime=false);
+    register!(
+        "default",
+        filter_default,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "default_if_none",
+        filter_default_if_none,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "yesno",
+        filter_yesno,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
 
-    register!("date", filter_date, safe=true, autoescape=false, localtime=true);
-    register!("time", filter_time, safe=true, autoescape=false, localtime=true);
-    register!("timesince", filter_timesince, safe=false, autoescape=false, localtime=false);
-    register!("timeuntil", filter_timeuntil, safe=false, autoescape=false, localtime=false);
+    register!(
+        "date",
+        filter_date,
+        safe = true,
+        autoescape = false,
+        localtime = true
+    );
+    register!(
+        "time",
+        filter_time,
+        safe = true,
+        autoescape = false,
+        localtime = true
+    );
+    register!(
+        "timesince",
+        filter_timesince,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "timeuntil",
+        filter_timeuntil,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
 
-    register!("iriencode", filter_iriencode, safe=true, autoescape=false, localtime=false);
-    register!("urlencode", filter_urlencode, safe=false, autoescape=false, localtime=false);
+    register!(
+        "iriencode",
+        filter_iriencode,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "urlencode",
+        filter_urlencode,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
 
-    register!("json_script", filter_json_script, safe=true, autoescape=false, localtime=false);
-    register!("make_list", filter_make_list, safe=false, autoescape=false, localtime=false);
-    register!("phone2numeric", filter_phone2numeric, safe=true, autoescape=false, localtime=false);
-    register!("pprint", filter_pprint, safe=true, autoescape=false, localtime=false);
-    register!("stringformat", filter_stringformat, safe=true, autoescape=false, localtime=false);
-    register!("truncatechars_html", filter_truncatechars_html, safe=true, autoescape=false, localtime=false);
-    register!("truncatewords_html", filter_truncatewords_html, safe=true, autoescape=false, localtime=false);
+    register!(
+        "json_script",
+        filter_json_script,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "make_list",
+        filter_make_list,
+        safe = false,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "phone2numeric",
+        filter_phone2numeric,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "pprint",
+        filter_pprint,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "stringformat",
+        filter_stringformat,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "truncatechars_html",
+        filter_truncatechars_html,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
+    register!(
+        "truncatewords_html",
+        filter_truncatewords_html,
+        safe = true,
+        autoescape = false,
+        localtime = false
+    );
 
     m
 }
@@ -2058,29 +2362,72 @@ mod tests {
         Value::List(items)
     }
 
-
     #[test]
     fn test_registry_has_all_filters() {
         let filters = get_default_filters();
         let expected = [
-            "addslashes", "capfirst", "center", "cut", "escape", "escapejs",
-            "force_escape", "ljust", "lower", "rjust", "slugify", "striptags",
-            "title", "truncatechars", "truncatewords", "upper", "wordcount",
-            "wordwrap", "linebreaks", "linebreaksbr", "linenumbers", "safe",
-            "safeseq", "urlize", "urlizetrunc", "first", "join", "last",
-            "length", "length_is", "random", "slice", "dictsort",
-            "dictsortreversed", "unordered_list", "add", "divisibleby",
-            "filesizeformat", "floatformat", "get_digit", "pluralize",
-            "default", "default_if_none", "yesno", "date", "time",
-            "timesince", "timeuntil", "iriencode", "urlencode", "json_script",
-            "make_list", "phone2numeric", "pprint", "stringformat",
-            "truncatechars_html", "truncatewords_html",
+            "addslashes",
+            "capfirst",
+            "center",
+            "cut",
+            "escape",
+            "escapejs",
+            "force_escape",
+            "ljust",
+            "lower",
+            "rjust",
+            "slugify",
+            "striptags",
+            "title",
+            "truncatechars",
+            "truncatewords",
+            "upper",
+            "wordcount",
+            "wordwrap",
+            "linebreaks",
+            "linebreaksbr",
+            "linenumbers",
+            "safe",
+            "safeseq",
+            "urlize",
+            "urlizetrunc",
+            "first",
+            "join",
+            "last",
+            "length",
+            "length_is",
+            "random",
+            "slice",
+            "dictsort",
+            "dictsortreversed",
+            "unordered_list",
+            "add",
+            "divisibleby",
+            "filesizeformat",
+            "floatformat",
+            "get_digit",
+            "pluralize",
+            "default",
+            "default_if_none",
+            "yesno",
+            "date",
+            "time",
+            "timesince",
+            "timeuntil",
+            "iriencode",
+            "urlencode",
+            "json_script",
+            "make_list",
+            "phone2numeric",
+            "pprint",
+            "stringformat",
+            "truncatechars_html",
+            "truncatewords_html",
         ];
         for name in &expected {
             assert!(filters.contains_key(*name), "missing filter: {name}");
         }
     }
-
 
     #[test]
     fn test_addslashes() {
@@ -2104,7 +2451,10 @@ mod tests {
 
     #[test]
     fn test_cut() {
-        assert_eq!(filter_cut(&s("hello world"), &[s("o")], false), s("hell wrld"));
+        assert_eq!(
+            filter_cut(&s("hello world"), &[s("o")], false),
+            s("hell wrld")
+        );
     }
 
     #[test]
@@ -2117,7 +2467,10 @@ mod tests {
 
     #[test]
     fn test_lower() {
-        assert_eq!(filter_lower(&s("Hello World"), &[], false), s("hello world"));
+        assert_eq!(
+            filter_lower(&s("Hello World"), &[], false),
+            s("hello world")
+        );
     }
 
     #[test]
@@ -2152,10 +2505,7 @@ mod tests {
             s("hello w\u{2026}")
         );
         // No truncation needed.
-        assert_eq!(
-            filter_truncatechars(&s("hi"), &[int(10)], false),
-            s("hi")
-        );
+        assert_eq!(filter_truncatechars(&s("hi"), &[int(10)], false), s("hi"));
     }
 
     #[test]
@@ -2180,7 +2530,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_linebreaksbr() {
         assert_eq!(
@@ -2193,7 +2542,6 @@ mod tests {
     fn test_safe() {
         assert_eq!(filter_safe(&s("hello"), &[], false), safe("hello"));
     }
-
 
     #[test]
     fn test_first() {
@@ -2238,7 +2586,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_add_integers() {
         assert_eq!(filter_add(&int(4), &[int(2)], false), int(6));
@@ -2246,19 +2593,34 @@ mod tests {
 
     #[test]
     fn test_add_strings() {
-        assert_eq!(filter_add(&s("hello "), &[s("world")], false), s("hello world"));
+        assert_eq!(
+            filter_add(&s("hello "), &[s("world")], false),
+            s("hello world")
+        );
     }
 
     #[test]
     fn test_divisibleby() {
-        assert_eq!(filter_divisibleby(&int(10), &[int(5)], false), Value::Bool(true));
-        assert_eq!(filter_divisibleby(&int(10), &[int(3)], false), Value::Bool(false));
+        assert_eq!(
+            filter_divisibleby(&int(10), &[int(5)], false),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            filter_divisibleby(&int(10), &[int(3)], false),
+            Value::Bool(false)
+        );
     }
 
     #[test]
     fn test_filesizeformat() {
-        assert_eq!(filter_filesizeformat(&int(0), &[], false), s("0\u{a0}bytes"));
-        assert_eq!(filter_filesizeformat(&int(1024), &[], false), s("1.0\u{a0}KB"));
+        assert_eq!(
+            filter_filesizeformat(&int(0), &[], false),
+            s("0\u{a0}bytes")
+        );
+        assert_eq!(
+            filter_filesizeformat(&int(1024), &[], false),
+            s("1.0\u{a0}KB")
+        );
         assert_eq!(
             filter_filesizeformat(&int(1048576), &[], false),
             s("1.0\u{a0}MB")
@@ -2293,12 +2655,20 @@ mod tests {
         assert_eq!(filter_get_digit(&int(12345), &[int(3)], false), int(3));
     }
 
-
     #[test]
     fn test_default() {
-        assert_eq!(filter_default(&s(""), &[s("fallback")], false), s("fallback"));
-        assert_eq!(filter_default(&s("value"), &[s("fallback")], false), s("value"));
-        assert_eq!(filter_default(&Value::None, &[s("fallback")], false), s("fallback"));
+        assert_eq!(
+            filter_default(&s(""), &[s("fallback")], false),
+            s("fallback")
+        );
+        assert_eq!(
+            filter_default(&s("value"), &[s("fallback")], false),
+            s("value")
+        );
+        assert_eq!(
+            filter_default(&Value::None, &[s("fallback")], false),
+            s("fallback")
+        );
     }
 
     #[test]
@@ -2329,7 +2699,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_urlencode() {
         assert_eq!(
@@ -2341,7 +2710,6 @@ mod tests {
             safe("/path/to/file")
         );
     }
-
 
     #[test]
     fn test_make_list() {
@@ -2387,7 +2755,6 @@ mod tests {
             _ => panic!("expected SafeString"),
         }
     }
-
 
     #[test]
     fn test_safe_input_preserved_by_safe_filter() {

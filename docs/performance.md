@@ -56,7 +56,7 @@ superlinearly past N=1000 (p99 climbs faster than mean).
 ## Reproducing
 
 ```sh
-uv sync --group dev --group bench
+uv sync --group dev
 uv run --no-sync python benches/bench.py
 ```
 

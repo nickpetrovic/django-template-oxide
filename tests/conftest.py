@@ -143,3 +143,21 @@ def _patch_template_render():
         return result
 
     DjangoTemplate._render = _oxide_render
+
+
+def pytest_collection_modifyitems(config, items):
+    """Deselect ``test_response.test_processor``.
+
+    It is a Django context processor referenced by dotted path, not a
+    test; pytest collects it only because of the ``test_`` prefix and then
+    warns that it returns a dict. Django's unittest runner never ran it.
+    """
+    selected, deselected = [], []
+    for item in items:
+        if item.nodeid.endswith("test_response.py::test_processor"):
+            deselected.append(item)
+        else:
+            selected.append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected

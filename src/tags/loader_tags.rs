@@ -206,7 +206,14 @@ fn load_template_source_and_engine<'py>(
     py: Python<'py>,
     template_name: &str,
     context: &Context,
-) -> Result<(String, Option<pyo3::Py<pyo3::PyAny>>, Option<pyo3::Py<pyo3::PyAny>>), TemplateError> {
+) -> Result<
+    (
+        String,
+        Option<pyo3::Py<pyo3::PyAny>>,
+        Option<pyo3::Py<pyo3::PyAny>>,
+    ),
+    TemplateError,
+> {
     let map_py_err = |e: pyo3::PyErr| -> TemplateError {
         let exc_mod = py.import("django.template.exceptions");
         let is_tdne = exc_mod
@@ -229,7 +236,9 @@ fn load_template_source_and_engine<'py>(
             .map(|cls| e.is_instance(py, &cls))
             .unwrap_or(false);
         if is_tse {
-            let msg = e.value(py).str()
+            let msg = e
+                .value(py)
+                .str()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| format!("{}", e));
             return TemplateError::TemplateSyntaxError(msg);
@@ -262,9 +271,7 @@ fn load_template_source_and_engine<'py>(
     }
 
     let loader = py.import("django.template.loader").map_err(|e| {
-        TemplateError::Internal(format!(
-            "Failed to import django.template.loader: {e}"
-        ))
+        TemplateError::Internal(format!("Failed to import django.template.loader: {e}"))
     })?;
     let django_template = loader
         .call_method1("get_template", (template_name,))
@@ -289,10 +296,7 @@ fn load_template_source_and_engine<'py>(
         .getattr("origin")
         .ok()
         .and_then(|o| if o.is_none() { None } else { Some(o.unbind()) });
-    let engine = django_template
-        .getattr("engine")
-        .ok()
-        .map(|e| e.unbind());
+    let engine = django_template.getattr("engine").ok().map(|e| e.unbind());
     Ok((source, engine, origin))
 }
 
@@ -353,7 +357,9 @@ fn resolve_template_name(
                         if let Ok(s) = bound.extract::<String>() {
                             return Ok(s);
                         }
-                        let type_name = bound.get_type().name()
+                        let type_name = bound
+                            .get_type()
+                            .name()
                             .map(|n| n.to_string())
                             .unwrap_or_else(|_| "unknown".to_string());
                         Err(TemplateError::TemplateSyntaxError(format!(
@@ -367,48 +373,6 @@ fn resolve_template_name(
                     other,
                 ))),
             }
-        }
-    }
-}
-
-/// Simplified `FilterExpression` -> `Value` for `{% include %}` extras.
-fn resolve_filter_expression_to_value(
-    fe: &FilterExpression,
-    context: &Context,
-) -> Value {
-    match &fe.var {
-        FilterExpressionVar::Constant(Some(s)) => Value::SafeString(s.clone().into()),
-        FilterExpressionVar::Constant(None) => Value::None,
-        FilterExpressionVar::Var(variable) => {
-            let parts: Vec<&str> = variable.var.split('.').collect();
-            let mut current = match context.get(parts[0]) {
-                Some(v) => v.clone(),
-                None => {
-                    if let Ok(n) = variable.var.parse::<i64>() {
-                        return Value::Int(n);
-                    }
-                    if let Ok(f) = variable.var.parse::<f64>() {
-                        return Value::Float(f);
-                    }
-                    return Value::String(String::new());
-                }
-            };
-            for part in &parts[1..] {
-                current = match &current {
-                    Value::Dict(map) => {
-                        map.get(*part).cloned().unwrap_or(Value::String(String::new()))
-                    }
-                    Value::List(items) => {
-                        if let Ok(idx) = part.parse::<usize>() {
-                            items.get(idx).cloned().unwrap_or(Value::String(String::new()))
-                        } else {
-                            Value::String(String::new())
-                        }
-                    }
-                    _ => Value::String(String::new()),
-                };
-            }
-            current
         }
     }
 }
@@ -486,7 +450,8 @@ impl Node for BlockNode {
             if nodelist_uses_block_super(&self.nodelist) {
                 return Err(TemplateError::TemplateSyntaxError(
                     "'BlockNode' object has no attribute 'context'. Did you use \
-                     {{ block.super }} in a base template?".to_owned(),
+                     {{ block.super }} in a base template?"
+                        .to_owned(),
                 ));
             }
             // No inheritance: render directly.
@@ -574,7 +539,10 @@ fn render_block_super(
 
     // Set up block.super for the parent's render
     let mut block_dict = indexmap::IndexMap::new();
-    block_dict.insert("super".to_string(), Value::SafeString(parent_super_content.into()));
+    block_dict.insert(
+        "super".to_string(),
+        Value::SafeString(parent_super_content.into()),
+    );
     context.push_with({
         let mut m = HashMap::new();
         m.insert("block".to_owned(), Value::Dict(block_dict));
@@ -715,9 +683,10 @@ impl ExtendsNode {
             .or_else(|| {
                 context.template.as_ref().and_then(|tref| {
                     let bound = tref.obj.bind(py);
-                    bound.getattr("origin").ok().and_then(|o| {
-                        if o.is_none() { None } else { Some(o.unbind()) }
-                    })
+                    bound
+                        .getattr("origin")
+                        .ok()
+                        .and_then(|o| if o.is_none() { None } else { Some(o.unbind()) })
                 })
             });
 
@@ -739,10 +708,12 @@ impl ExtendsNode {
                     Value::PyObject(obj) => {
                         let bound = obj.bind(py);
                         // Try .source (base.Template) or .template.source (backends.django.Template)
-                        let source_str = bound.getattr("source")
+                        let source_str = bound
+                            .getattr("source")
                             .and_then(|s| s.extract::<String>())
                             .or_else(|_| {
-                                bound.getattr("template")
+                                bound
+                                    .getattr("template")
                                     .and_then(|t| t.getattr("source"))
                                     .and_then(|s| s.extract::<String>())
                             });
@@ -753,27 +724,29 @@ impl ExtendsNode {
                                 &src,
                                 None,
                                 false,
-                                engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+                                engine_bound
+                                    .as_ref()
+                                    .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
                             )?;
                             Ok(Arc::new(nl))
                         } else {
                             Err(TemplateError::TemplateSyntaxError(format!(
                                 "Template name must be a string or Template, got: {}",
-                                bound.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "unknown".to_string()),
+                                bound
+                                    .get_type()
+                                    .name()
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_else(|_| "unknown".to_string()),
                             )))
                         }
                     }
-                    Value::None => {
-                        Err(TemplateError::TemplateSyntaxError(
-                            "Template name resolved to None".to_owned(),
-                        ))
-                    }
-                    _ => {
-                        Err(TemplateError::TemplateSyntaxError(format!(
-                            "Template name must be a string, got: {}",
-                            val,
-                        )))
-                    }
+                    Value::None => Err(TemplateError::TemplateSyntaxError(
+                        "Template name resolved to None".to_owned(),
+                    )),
+                    _ => Err(TemplateError::TemplateSyntaxError(format!(
+                        "Template name must be a string, got: {}",
+                        val,
+                    ))),
                 }
             }
         }
@@ -818,7 +791,9 @@ fn load_template_with_history(
                 })?;
             }
             let py_obj = list.clone().into_any().unbind();
-            context.render_context.set(history_key.clone(), Value::PyObject(py_obj.clone_ref(py)));
+            context
+                .render_context
+                .set(history_key.clone(), Value::PyObject(py_obj.clone_ref(py)));
             py_obj
         }
     };
@@ -827,22 +802,22 @@ fn load_template_with_history(
 
     // Call engine.find_template(template_name, skip=history_list)
     let find_kwargs = pyo3::types::PyDict::new(py);
-    find_kwargs.set_item("skip", history_bound).map_err(|e| {
-        TemplateError::Internal(format!("Failed to set skip: {e}"))
-    })?;
+    find_kwargs
+        .set_item("skip", history_bound)
+        .map_err(|e| TemplateError::Internal(format!("Failed to set skip: {e}")))?;
 
-    let find_result = engine_bound
-        .call_method("find_template", (template_name,), Some(&find_kwargs));
+    let find_result =
+        engine_bound.call_method("find_template", (template_name,), Some(&find_kwargs));
 
     let (django_template, origin) = match find_result {
         Ok(result) => {
             // Returns (Template, Origin)
-            let template = result.get_item(0).map_err(|e| {
-                TemplateError::Internal(format!("find_template result error: {e}"))
-            })?;
-            let origin = result.get_item(1).map_err(|e| {
-                TemplateError::Internal(format!("find_template origin error: {e}"))
-            })?;
+            let template = result
+                .get_item(0)
+                .map_err(|e| TemplateError::Internal(format!("find_template result error: {e}")))?;
+            let origin = result
+                .get_item(1)
+                .map_err(|e| TemplateError::Internal(format!("find_template origin error: {e}")))?;
             (template, origin)
         }
         Err(e) => {
@@ -863,12 +838,12 @@ fn load_template_with_history(
     };
 
     // Add origin to history
-    let history_list_ref = history_bound.downcast::<pyo3::types::PyList>().map_err(|_| {
-        TemplateError::Internal("History is not a list".into())
-    })?;
-    history_list_ref.append(&origin).map_err(|e| {
-        TemplateError::Internal(format!("Failed to append to history: {e}"))
-    })?;
+    let history_list_ref = history_bound
+        .cast::<pyo3::types::PyList>()
+        .map_err(|_| TemplateError::Internal("History is not a list".into()))?;
+    history_list_ref
+        .append(&origin)
+        .map_err(|e| TemplateError::Internal(format!("Failed to append to history: {e}")))?;
 
     // Get template source and compile
     let source: String = django_template
@@ -895,20 +870,17 @@ fn load_template_with_history(
     )?;
 
     if let Some(pname) = partial_name {
-        extract_partial_arc(&nodelist, pname).ok_or_else(|| {
-            TemplateError::TemplateDoesNotExist {
-                msg: template_name.to_owned(),
-                tried: vec![],
-                chain: vec![],
-            }
+        extract_partial_arc(&nodelist, pname).ok_or_else(|| TemplateError::TemplateDoesNotExist {
+            msg: template_name.to_owned(),
+            tried: vec![],
+            chain: vec![],
         })
     } else {
         Ok(Arc::new(nodelist))
     }
 }
 
-static INCLUDE_COUNTER: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static INCLUDE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// `{% include "fragment.html" %}`. Mirrors `IncludeNode`.
 #[derive(Debug)]
@@ -955,7 +927,9 @@ impl Node for IncludeNode {
         // `construct_relative_path(self.origin.template_name, name)`.
         let resolve_name = |name: &str| -> String {
             if name.starts_with("./") || name.starts_with("../") {
-                let current_template = self.origin_field.as_ref()
+                let current_template = self
+                    .origin_field
+                    .as_ref()
                     .and_then(|o| o.template_name.as_deref());
                 if let Some(resolved) = construct_relative_path(current_template, name) {
                     return resolved;
@@ -975,13 +949,15 @@ impl Node for IncludeNode {
             }
             Value::String(s) => {
                 let resolved = resolve_name(s);
-                let (nl, origin) = load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?;
+                let (nl, origin) =
+                    load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?;
                 nodelist = nl;
                 loaded_origin = origin;
             }
             Value::SafeString(s) => {
                 let resolved = resolve_name(s.as_ref());
-                let (nl, origin) = load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?;
+                let (nl, origin) =
+                    load_template_nodelist(py, &resolved, context, Some(&self.cache_key))?;
                 nodelist = nl;
                 loaded_origin = origin;
             }
@@ -996,10 +972,12 @@ impl Node for IncludeNode {
                 let bound = obj.bind(py);
 
                 // Try to get source: directly (.source) or via wrapper (.template.source)
-                let source_str = bound.getattr("source")
+                let source_str = bound
+                    .getattr("source")
                     .and_then(|s| s.extract::<String>())
                     .or_else(|_| {
-                        bound.getattr("template")
+                        bound
+                            .getattr("template")
                             .and_then(|t| t.getattr("source"))
                             .and_then(|s| s.extract::<String>())
                     });
@@ -1011,11 +989,14 @@ impl Node for IncludeNode {
                         &src,
                         None,
                         false,
-                        engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+                        engine_bound
+                            .as_ref()
+                            .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
                     )?;
                     nodelist = Arc::new(nl);
                 } else if let Ok(name) = bound.extract::<String>() {
-                    let (nl, origin) = load_template_nodelist(py, &name, context, Some(&self.cache_key))?;
+                    let (nl, origin) =
+                        load_template_nodelist(py, &name, context, Some(&self.cache_key))?;
                     nodelist = nl;
                     loaded_origin = origin;
                 } else if bound.is_none() {
@@ -1035,10 +1016,14 @@ impl Node for IncludeNode {
                                 if let Ok(src) = source.extract::<String>() {
                                     let engine_bound = context.engine.as_ref().map(|e| e.bind(py));
                                     match Template::compile_nodelist_with_engine(
-                                        &src, None, false,
-                                        engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+                                        &src,
+                                        None,
+                                        false,
+                                        engine_bound
+                                            .as_ref()
+                                            .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
                                     ) {
-                                        Ok(nl) => {
+                                        Ok(_) => {
                                             last_err = None;
                                             break;
                                         }
@@ -1053,7 +1038,8 @@ impl Node for IncludeNode {
                             } else {
                                 continue;
                             };
-                            match load_template_nodelist(py, &name, context, Some(&self.cache_key)) {
+                            match load_template_nodelist(py, &name, context, Some(&self.cache_key))
+                            {
                                 Ok((nl, _origin)) => {
                                     // Found! Use this directly with extra context below
                                     let mut extra: HashMap<String, Value> = HashMap::new();
@@ -1066,7 +1052,8 @@ impl Node for IncludeNode {
                                         isolated.autoescape = context.autoescape;
                                         isolated.use_l10n = context.use_l10n;
                                         isolated.use_tz = context.use_tz;
-                                        isolated.string_if_invalid = context.string_if_invalid.clone();
+                                        isolated.string_if_invalid =
+                                            context.string_if_invalid.clone();
                                         isolated.engine = context.engine.clone();
                                         isolated.debug = context.debug;
                                         let result = nl.render(py, &mut isolated)?;
@@ -1098,7 +1085,11 @@ impl Node for IncludeNode {
                     } else {
                         return Err(TemplateError::TemplateSyntaxError(format!(
                             "Template name must be a string, got: {}",
-                            bound.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "unknown".to_string()),
+                            bound
+                                .get_type()
+                                .name()
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|_| "unknown".to_string()),
                         )));
                     }
                 }
@@ -1125,17 +1116,14 @@ impl Node for IncludeNode {
         // Django's Template.render which wraps in push_state). We
         // don't push a full render_context layer because {% ifchanged %}
         // state must persist across includes within a for loop.
-        let saved_extends_ctx = context.render_context.get("extends_context")
-            .cloned();
-        let saved_current_origin = context.render_context.get(CURRENT_ORIGIN_KEY)
-            .cloned();
+        let saved_extends_ctx = context.render_context.get("extends_context").cloned();
+        let saved_current_origin = context.render_context.get(CURRENT_ORIGIN_KEY).cloned();
         // Remove extends_context from current layer so inner extends
         // chain starts fresh.
         if saved_extends_ctx.is_some() {
-            context.render_context.set(
-                "extends_context".to_owned(),
-                Value::None,
-            );
+            context
+                .render_context
+                .set("extends_context".to_owned(), Value::None);
         }
 
         // Store the loaded template's Python Origin so ExtendsNode
@@ -1143,10 +1131,9 @@ impl Node for IncludeNode {
         // history correctly (instead of context.template.origin which
         // points to the outer template).
         if let Some(origin) = loaded_origin {
-            context.render_context.set(
-                CURRENT_ORIGIN_KEY.to_owned(),
-                Value::PyObject(origin),
-            );
+            context
+                .render_context
+                .set(CURRENT_ORIGIN_KEY.to_owned(), Value::PyObject(origin));
         }
 
         let render_result = if self.isolated_context {
@@ -1172,18 +1159,16 @@ impl Node for IncludeNode {
             context.render_context.set("extends_context".to_owned(), v);
         } else {
             // Remove the key the inner chain may have created.
-            context.render_context.set(
-                "extends_context".to_owned(),
-                Value::None,
-            );
+            context
+                .render_context
+                .set("extends_context".to_owned(), Value::None);
         }
         if let Some(v) = saved_current_origin {
             context.render_context.set(CURRENT_ORIGIN_KEY.to_owned(), v);
         } else {
-            context.render_context.set(
-                CURRENT_ORIGIN_KEY.to_owned(),
-                Value::None,
-            );
+            context
+                .render_context
+                .set(CURRENT_ORIGIN_KEY.to_owned(), Value::None);
         }
 
         context.block_context = saved_block_context;
@@ -1305,7 +1290,10 @@ fn maybe_resolve_relative(parser: &Parser, name: &str) -> String {
     if !unquoted.starts_with("./") && !unquoted.starts_with("../") {
         return name.to_owned();
     }
-    let current = parser.origin.as_ref().and_then(|o| o.template_name.as_deref());
+    let current = parser
+        .origin
+        .as_ref()
+        .and_then(|o| o.template_name.as_deref());
     match construct_relative_path(current, unquoted) {
         Some(resolved) => {
             let q = &name[..1];
@@ -1466,6 +1454,7 @@ fn nodelist_uses_block_super(nodelist: &NodeList) -> bool {
 /// Extract the block name from a `BlockNode` Debug representation.
 ///
 /// Looks for `name: "..."` in the debug string.
+#[cfg(test)]
 fn extract_block_name(debug_str: &str) -> Option<String> {
     let marker = "name: \"";
     let start = debug_str.find(marker)? + marker.len();
@@ -1603,8 +1592,7 @@ mod tests {
 
     #[test]
     fn test_compile_block_with_endblock_name() {
-        let mut parser =
-            parser_with_loader_tags("{% block title %}Hello{% endblock title %}");
+        let mut parser = parser_with_loader_tags("{% block title %}Hello{% endblock title %}");
         let nodelist = parser.parse(&[]).unwrap();
 
         assert_eq!(nodelist.len(), 1);
@@ -1612,8 +1600,7 @@ mod tests {
 
     #[test]
     fn test_compile_block_mismatched_endblock_name() {
-        let mut parser =
-            parser_with_loader_tags("{% block title %}Hello{% endblock content %}");
+        let mut parser = parser_with_loader_tags("{% block title %}Hello{% endblock content %}");
         let err = parser.parse(&[]).unwrap_err();
 
         match err {
@@ -1656,8 +1643,9 @@ mod tests {
 
     #[test]
     fn test_compile_extends_basic() {
-        let mut parser =
-            parser_with_loader_tags(r#"{% extends "base.html" %}{% block title %}Hi{% endblock %}"#);
+        let mut parser = parser_with_loader_tags(
+            r#"{% extends "base.html" %}{% block title %}Hi{% endblock %}"#,
+        );
         let nodelist = parser.parse(&[]).unwrap();
 
         // The extends node should be the only top-level node.
@@ -1718,9 +1706,8 @@ mod tests {
 
     #[test]
     fn test_compile_include_with_only() {
-        let mut parser = parser_with_loader_tags(
-            r#"{% include "header.html" with title=page_title only %}"#,
-        );
+        let mut parser =
+            parser_with_loader_tags(r#"{% include "header.html" with title=page_title only %}"#);
         let nodelist = parser.parse(&[]).unwrap();
 
         assert_eq!(nodelist.len(), 1);
@@ -1765,9 +1752,7 @@ mod tests {
     #[test]
     fn test_block_node_render_no_inheritance() {
         Python::attach(|py| {
-            let mut parser = parser_with_loader_tags(
-                "{% block title %}Hello World{% endblock %}",
-            );
+            let mut parser = parser_with_loader_tags("{% block title %}Hello World{% endblock %}");
             let nodelist = parser.parse(&[]).unwrap();
             // Fresh Context starts with block_context: None - standalone render.
             let mut ctx = Context::new(None);

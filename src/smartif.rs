@@ -46,8 +46,14 @@ impl InfixOp {
             Self::Or => 6,
             Self::And => 7,
             Self::In | Self::NotIn => 9,
-            Self::Is | Self::IsNot | Self::Eq | Self::NotEq |
-            Self::Gt | Self::Gte | Self::Lt | Self::Lte => 10,
+            Self::Is
+            | Self::IsNot
+            | Self::Eq
+            | Self::NotEq
+            | Self::Gt
+            | Self::Gte
+            | Self::Lt
+            | Self::Lte => 10,
         }
     }
 }
@@ -270,7 +276,9 @@ mod tests {
     fn test_not_prefix() {
         let expr = parse_tokens(&["not", "x"]).unwrap();
         match expr {
-            IfExpr::Prefix { op: PrefixOp::Not, .. } => {}
+            IfExpr::Prefix {
+                op: PrefixOp::Not, ..
+            } => {}
             _ => panic!("Expected not prefix"),
         }
     }
@@ -279,7 +287,9 @@ mod tests {
     fn test_and_infix() {
         let expr = parse_tokens(&["x", "and", "y"]).unwrap();
         match expr {
-            IfExpr::Infix { op: InfixOp::And, .. } => {}
+            IfExpr::Infix {
+                op: InfixOp::And, ..
+            } => {}
             _ => panic!("Expected and infix"),
         }
     }
@@ -288,7 +298,9 @@ mod tests {
     fn test_or_infix() {
         let expr = parse_tokens(&["x", "or", "y"]).unwrap();
         match expr {
-            IfExpr::Infix { op: InfixOp::Or, .. } => {}
+            IfExpr::Infix {
+                op: InfixOp::Or, ..
+            } => {}
             _ => panic!("Expected or infix"),
         }
     }
@@ -297,7 +309,9 @@ mod tests {
     fn test_not_in_combined() {
         let expr = parse_tokens(&["x", "not", "in", "y"]).unwrap();
         match expr {
-            IfExpr::Infix { op: InfixOp::NotIn, .. } => {}
+            IfExpr::Infix {
+                op: InfixOp::NotIn, ..
+            } => {}
             _ => panic!("Expected not in"),
         }
     }
@@ -306,7 +320,9 @@ mod tests {
     fn test_is_not_combined() {
         let expr = parse_tokens(&["x", "is", "not", "y"]).unwrap();
         match expr {
-            IfExpr::Infix { op: InfixOp::IsNot, .. } => {}
+            IfExpr::Infix {
+                op: InfixOp::IsNot, ..
+            } => {}
             _ => panic!("Expected is not"),
         }
     }
@@ -316,12 +332,16 @@ mod tests {
         // "x or y and z" parses as "x or (y and z)" since and > or.
         let expr = parse_tokens(&["x", "or", "y", "and", "z"]).unwrap();
         match &expr {
-            IfExpr::Infix { op: InfixOp::Or, right, .. } => {
-                match right.as_ref() {
-                    IfExpr::Infix { op: InfixOp::And, .. } => {}
-                    _ => panic!("Expected and on right of or"),
-                }
-            }
+            IfExpr::Infix {
+                op: InfixOp::Or,
+                right,
+                ..
+            } => match right.as_ref() {
+                IfExpr::Infix {
+                    op: InfixOp::And, ..
+                } => {}
+                _ => panic!("Expected and on right of or"),
+            },
             _ => panic!("Expected or at top"),
         }
     }
@@ -367,18 +387,27 @@ mod tests {
         // "not x == y and z in w" -> (not (x == y)) and (z in w).
         let expr = parse_tokens(&["not", "x", "==", "y", "and", "z", "in", "w"]).unwrap();
         match &expr {
-            IfExpr::Infix { op: InfixOp::And, left, right } => {
+            IfExpr::Infix {
+                op: InfixOp::And,
+                left,
+                right,
+            } => {
                 match left.as_ref() {
-                    IfExpr::Prefix { op: PrefixOp::Not, operand } => {
-                        match operand.as_ref() {
-                            IfExpr::Infix { op: InfixOp::Eq, .. } => {}
-                            _ => panic!("Expected == inside not"),
-                        }
-                    }
+                    IfExpr::Prefix {
+                        op: PrefixOp::Not,
+                        operand,
+                    } => match operand.as_ref() {
+                        IfExpr::Infix {
+                            op: InfixOp::Eq, ..
+                        } => {}
+                        _ => panic!("Expected == inside not"),
+                    },
                     _ => panic!("Expected not prefix on left of and"),
                 }
                 match right.as_ref() {
-                    IfExpr::Infix { op: InfixOp::In, .. } => {}
+                    IfExpr::Infix {
+                        op: InfixOp::In, ..
+                    } => {}
                     _ => panic!("Expected in on right of and"),
                 }
             }

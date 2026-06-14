@@ -18,9 +18,9 @@ fn pydict_to_context_dict(dict: Option<&Bound<'_, PyAny>>) -> PyResult<Option<ct
             if obj.is_none() {
                 return Ok(None);
             }
-            let pydict: &Bound<'_, PyDict> = obj.cast().map_err(|_| {
-                PyRuntimeError::new_err("Context argument must be a dict or None")
-            })?;
+            let pydict: &Bound<'_, PyDict> = obj
+                .cast()
+                .map_err(|_| PyRuntimeError::new_err("Context argument must be a dict or None"))?;
             let mut map = HashMap::new();
             for (k, v) in pydict.iter() {
                 let key: String = k.extract()?;
@@ -45,10 +45,7 @@ fn context_dict_to_pydict<'py>(
 
 /// Clone-based PyContext bridge. Mutations don't propagate back; used
 /// only on the rare Python custom-tag render path.
-pub fn context_to_py_context(
-    py: Python<'_>,
-    context: &ctx::Context,
-) -> PyResult<Py<PyContext>> {
+pub fn context_to_py_context(py: Python<'_>, context: &ctx::Context) -> PyResult<Py<PyContext>> {
     let cloned = context.clone();
     Py::new(py, PyContext { inner: cloned })
 }
@@ -93,9 +90,10 @@ impl PyContext {
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         match self.inner.get(name) {
             Some(v) => Ok(v.to_pyobject(py)),
-            None => Err(pyo3::exceptions::PyAttributeError::new_err(
-                format!("'Context' object has no attribute '{}'", name),
-            )),
+            None => Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                "'Context' object has no attribute '{}'",
+                name
+            ))),
         }
     }
 
@@ -474,10 +472,7 @@ impl PyContext {
 
 /// Context-manager from `bind_template`; `__exit__` clears
 /// `context.template`. Mirrors `Context.bind_template` (context.py:155-163).
-#[pyclass(
-    name = "ContextBoundTemplate",
-    module = "django_template_oxide._rust"
-)]
+#[pyclass(name = "ContextBoundTemplate", module = "django_template_oxide._rust")]
 pub struct PyContextBoundTemplate {
     context: Py<PyContext>,
 }
@@ -531,10 +526,7 @@ impl PyContextDict {
 
 /// Borrow-through view of a `Context`'s `RenderContext`. Mirrors
 /// Django's top-only `__getitem__` semantics (context.py).
-#[pyclass(
-    name = "RenderContext",
-    module = "django_template_oxide._rust"
-)]
+#[pyclass(name = "RenderContext", module = "django_template_oxide._rust")]
 pub struct PyRenderContext {
     context: Py<PyContext>,
 }
@@ -580,17 +572,11 @@ impl PyRenderContext {
         let ctx = self.context.bind(py).borrow();
         match ctx.inner.render_context.get_key(&rk) {
             Some(v) => Ok(v.to_pyobject(py)),
-            None => Err(pyo3::exceptions::PyKeyError::new_err(
-                key.clone().unbind(),
-            )),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(key.clone().unbind())),
         }
     }
 
-    fn __setitem__(
-        &mut self,
-        key: &Bound<'_, PyAny>,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let rk = crate::context::RenderKey::from_py(key)?;
         let mut ctx = self.context.bind(value.py()).borrow_mut();
         ctx.inner
@@ -637,11 +623,10 @@ impl PyRenderContext {
                 .getattr(pyo3::intern!(py, "name"))
                 .ok()
                 .and_then(|v| v.extract::<Option<String>>().ok().flatten());
-            parent.inner.render_context.template =
-                Some(crate::context::TemplateRef {
-                    name: name.unwrap_or_default(),
-                    obj: template.clone().unbind(),
-                });
+            parent.inner.render_context.template = Some(crate::context::TemplateRef {
+                name: name.unwrap_or_default(),
+                obj: template.clone().unbind(),
+            });
             if isolated_context {
                 parent.inner.render_context.push();
             }
@@ -668,10 +653,7 @@ impl PyRenderContext {
 /// `__exit__` restores the saved template ref and pops the dict layer
 /// if `isolated_context` was true. Mirrors the `try/finally` of
 /// `RenderContext.push_state`.
-#[pyclass(
-    name = "RenderContextState",
-    module = "django_template_oxide._rust"
-)]
+#[pyclass(name = "RenderContextState", module = "django_template_oxide._rust")]
 pub struct PyRenderContextState {
     context: Py<PyContext>,
     /// `Mutex` so we can move out on `__exit__(&self)` while keeping
@@ -709,7 +691,7 @@ impl PyRenderContextState {
 
 /// Drop-in `django.template.base.Template`. `unsendable` (NodeList
 /// contains non-Send `dyn Node`).
-#[pyclass(name = "Template", module = "django_template_oxide._rust")]
+#[pyclass(name = "Template", module = "django_template_oxide._rust", weakref)]
 pub struct PyTemplate {
     inner: template::Template,
     origin_value: Option<Py<PyAny>>,
@@ -767,7 +749,9 @@ impl PyTemplate {
             name,
             debug,
             string_if_invalid,
-            engine_bound.as_ref().map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
+            engine_bound
+                .as_ref()
+                .map(|b| b as &pyo3::Bound<'_, pyo3::PyAny>),
         )
         .map_err(|e| -> PyErr {
             // When called directly via the oxide API (OxideTemplate()),
@@ -812,9 +796,7 @@ impl PyTemplate {
                         map.insert(key, Value::from(&v));
                     }
                     ctx::Context::new(Some(map))
-                } else if obj
-                    .hasattr(pyo3::intern!(py, "flatten"))
-                    .unwrap_or(false)
+                } else if obj.hasattr(pyo3::intern!(py, "flatten")).unwrap_or(false)
                     && obj
                         .hasattr(pyo3::intern!(py, "autoescape"))
                         .unwrap_or(false)
@@ -823,9 +805,7 @@ impl PyTemplate {
                     // flatten + copy engine settings into our Context.
                     let flat = obj.call_method0(pyo3::intern!(py, "flatten"))?;
                     let flat_dict = flat.cast::<PyDict>().map_err(|_| {
-                        PyRuntimeError::new_err(
-                            "Context.flatten() did not return a dict",
-                        )
+                        PyRuntimeError::new_err("Context.flatten() did not return a dict")
                     })?;
                     let mut map = HashMap::new();
                     for (k, v) in flat_dict.iter() {
@@ -833,26 +813,14 @@ impl PyTemplate {
                         map.insert(key, Value::from(&v));
                     }
                     let mut ctx = ctx::Context::new(Some(map));
-                    if let Ok(ae) =
-                        obj.getattr(pyo3::intern!(py, "autoescape"))
-                    {
+                    if let Ok(ae) = obj.getattr(pyo3::intern!(py, "autoescape")) {
                         ctx.autoescape = ae.extract::<bool>().unwrap_or(true);
                     }
-                    if let Ok(use_l10n) =
-                        obj.getattr(pyo3::intern!(py, "use_l10n"))
-                    {
-                        ctx.use_l10n = use_l10n
-                            .extract::<Option<bool>>()
-                            .ok()
-                            .flatten();
+                    if let Ok(use_l10n) = obj.getattr(pyo3::intern!(py, "use_l10n")) {
+                        ctx.use_l10n = use_l10n.extract::<Option<bool>>().ok().flatten();
                     }
-                    if let Ok(use_tz) =
-                        obj.getattr(pyo3::intern!(py, "use_tz"))
-                    {
-                        ctx.use_tz = use_tz
-                            .extract::<Option<bool>>()
-                            .ok()
-                            .flatten();
+                    if let Ok(use_tz) = obj.getattr(pyo3::intern!(py, "use_tz")) {
+                        ctx.use_tz = use_tz.extract::<Option<bool>>().ok().flatten();
                     }
                     ctx
                 } else {
@@ -1112,9 +1080,7 @@ fn render_to_string(
                 }
                 Some(map)
             } else {
-                return Err(PyRuntimeError::new_err(
-                    "context must be a dict or None",
-                ));
+                return Err(PyRuntimeError::new_err("context must be a dict or None"));
             }
         }
         None => None,
@@ -1217,9 +1183,7 @@ const PYTHON_DELEGATED_FILTERS: &[&str] = &["date", "time", "timesince", "timeun
 pub fn register_default_filters(py: Python<'_>, parser: &mut crate::parser::Parser) {
     let native_filters = get_default_filters();
 
-    let django_filters = py
-        .import("django.template.defaultfilters")
-        .ok();
+    let django_filters = py.import("django.template.defaultfilters").ok();
 
     for (name, native_filter) in native_filters {
         if PYTHON_DELEGATED_FILTERS.contains(&name.as_str()) {
@@ -1240,8 +1204,7 @@ pub fn register_default_filters(py: Python<'_>, parser: &mut crate::parser::Pars
             expects_localtime: native_filter.expects_localtime,
         };
 
-        let py_wrapper = Py::new(py, wrapper)
-            .expect("Failed to create NativeFilterWrapper");
+        let py_wrapper = Py::new(py, wrapper).expect("Failed to create NativeFilterWrapper");
 
         parser.filters.insert(name.clone(), py_wrapper.into_any());
     }

@@ -35,12 +35,13 @@ cargo test
 ## Bench
 
 ```sh
-uv sync --group dev --group bench
+uv sync --group dev
 uv run --no-sync python benches/bench.py
 ```
 
-`django-rusty-templates` is pulled from git for head-to-head
-comparison. See `benches/README.md` for what the workloads measure.
+`django-rusty-templates` is a `dev` dependency (pulled from git) for
+the head-to-head comparison. See `benches/README.md` for what the
+workloads measure.
 
 ## Project layout
 

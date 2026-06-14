@@ -24,7 +24,10 @@ mod imp {
     impl Guard {
         #[inline]
         pub fn new(name: &'static str) -> Self {
-            Self { name, start: Instant::now() }
+            Self {
+                name,
+                start: Instant::now(),
+            }
         }
     }
 
@@ -76,7 +79,14 @@ pub fn get_prof_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
                 let entry = PyDict::new(py);
                 entry.set_item("count", count)?;
                 entry.set_item("total_us", total.as_nanos() as u64 / 1000)?;
-                entry.set_item("avg_ns", if *count > 0 { total.as_nanos() as u64 / count } else { 0 })?;
+                entry.set_item(
+                    "avg_ns",
+                    if *count > 0 {
+                        total.as_nanos() as u64 / count
+                    } else {
+                        0
+                    },
+                )?;
                 dict.set_item(name, entry)?;
             }
             Ok(())

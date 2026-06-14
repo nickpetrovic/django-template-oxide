@@ -59,9 +59,7 @@ fn value_is_truthy(value: &Value) -> bool {
         // Defer to Python's `bool()` for opaque PyObjects (ErrorList,
         // QuerySet, custom `__bool__`/`__len__`). Assuming truthy here
         // caused `{% if field.errors %}` to always fire.
-        Value::PyObject(obj) => Python::attach(|py| {
-            obj.bind(py).is_truthy().unwrap_or(true)
-        }),
+        Value::PyObject(obj) => Python::attach(|py| obj.bind(py).is_truthy().unwrap_or(true)),
     }
 }
 
@@ -95,15 +93,11 @@ fn value_in(needle: &Value, haystack: &Value) -> bool {
             }
         }
         // Delegate `in` on PyObjects to Python's `__contains__`.
-        Value::PyObject(obj) => {
-            Python::attach(|py| {
-                let bound = obj.bind(py);
-                let needle_obj = needle.to_pyobject(py);
-                bound
-                    .contains(needle_obj.bind(py))
-                    .unwrap_or(false)
-            })
-        }
+        Value::PyObject(obj) => Python::attach(|py| {
+            let bound = obj.bind(py);
+            let needle_obj = needle.to_pyobject(py);
+            bound.contains(needle_obj.bind(py)).unwrap_or(false)
+        }),
         _ => false,
     }
 }
@@ -161,46 +155,45 @@ fn eval_if_expr(
                 false
             }
         }
-        IfExpr::Prefix { op: PrefixOp::Not, operand } => {
-            !eval_if_expr(py, operand, vars, context)
-        }
-        IfExpr::Infix { op, left, right } => {
-            match op {
-                InfixOp::And => {
-                    eval_if_expr(py, left, vars, context)
-                        && eval_if_expr(py, right, vars, context)
-                }
-                InfixOp::Or => {
-                    eval_if_expr(py, left, vars, context)
-                        || eval_if_expr(py, right, vars, context)
-                }
-                _ => {
-                    let left_val = eval_if_expr_to_value(py, left, vars, context);
-                    let right_val = eval_if_expr_to_value(py, right, vars, context);
-                    match op {
-                        InfixOp::Eq => left_val == right_val,
-                        InfixOp::NotEq => left_val != right_val,
-                        InfixOp::Gt => value_compare(&left_val, &right_val)
-                            == Some(std::cmp::Ordering::Greater),
-                        InfixOp::Gte => matches!(
-                            value_compare(&left_val, &right_val),
-                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                        ),
-                        InfixOp::Lt => value_compare(&left_val, &right_val)
-                            == Some(std::cmp::Ordering::Less),
-                        InfixOp::Lte => matches!(
-                            value_compare(&left_val, &right_val),
-                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                        ),
-                        InfixOp::In => value_in(&left_val, &right_val),
-                        InfixOp::NotIn => !value_in(&left_val, &right_val),
-                        InfixOp::Is => left_val == right_val,
-                        InfixOp::IsNot => left_val != right_val,
-                        InfixOp::And | InfixOp::Or => unreachable!(),
+        IfExpr::Prefix {
+            op: PrefixOp::Not,
+            operand,
+        } => !eval_if_expr(py, operand, vars, context),
+        IfExpr::Infix { op, left, right } => match op {
+            InfixOp::And => {
+                eval_if_expr(py, left, vars, context) && eval_if_expr(py, right, vars, context)
+            }
+            InfixOp::Or => {
+                eval_if_expr(py, left, vars, context) || eval_if_expr(py, right, vars, context)
+            }
+            _ => {
+                let left_val = eval_if_expr_to_value(py, left, vars, context);
+                let right_val = eval_if_expr_to_value(py, right, vars, context);
+                match op {
+                    InfixOp::Eq => left_val == right_val,
+                    InfixOp::NotEq => left_val != right_val,
+                    InfixOp::Gt => {
+                        value_compare(&left_val, &right_val) == Some(std::cmp::Ordering::Greater)
                     }
+                    InfixOp::Gte => matches!(
+                        value_compare(&left_val, &right_val),
+                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                    ),
+                    InfixOp::Lt => {
+                        value_compare(&left_val, &right_val) == Some(std::cmp::Ordering::Less)
+                    }
+                    InfixOp::Lte => matches!(
+                        value_compare(&left_val, &right_val),
+                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                    ),
+                    InfixOp::In => value_in(&left_val, &right_val),
+                    InfixOp::NotIn => !value_in(&left_val, &right_val),
+                    InfixOp::Is => left_val == right_val,
+                    InfixOp::IsNot => left_val != right_val,
+                    InfixOp::And | InfixOp::Or => unreachable!(),
                 }
             }
-        }
+        },
     }
 }
 
@@ -219,17 +212,26 @@ fn eval_if_expr_to_value(
                 Value::String(String::new())
             }
         }
-        IfExpr::Prefix { op: PrefixOp::Not, operand } => {
-            Value::Bool(!eval_if_expr(py, operand, vars, context))
-        }
-        IfExpr::Infix { op: InfixOp::And, left, right } => {
+        IfExpr::Prefix {
+            op: PrefixOp::Not,
+            operand,
+        } => Value::Bool(!eval_if_expr(py, operand, vars, context)),
+        IfExpr::Infix {
+            op: InfixOp::And,
+            left,
+            right,
+        } => {
             if eval_if_expr(py, left, vars, context) {
                 eval_if_expr_to_value(py, right, vars, context)
             } else {
                 eval_if_expr_to_value(py, left, vars, context)
             }
         }
-        IfExpr::Infix { op: InfixOp::Or, left, right } => {
+        IfExpr::Infix {
+            op: InfixOp::Or,
+            left,
+            right,
+        } => {
             if eval_if_expr(py, left, vars, context) {
                 eval_if_expr_to_value(py, left, vars, context)
             } else {
@@ -406,10 +408,7 @@ pub fn compile_if(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, T
     }))
 }
 
-fn parse_if_condition(
-    parser: &Parser,
-    bits: &[String],
-) -> Result<CompiledIfExpr, TemplateError> {
+fn parse_if_condition(parser: &Parser, bits: &[String]) -> Result<CompiledIfExpr, TemplateError> {
     let bit_refs: Vec<&str> = bits.iter().map(|s| s.as_str()).collect();
     let mut if_parser = IfParser::new(&bit_refs);
     let expr = if_parser.parse()?;
@@ -425,7 +424,6 @@ fn parse_if_condition(
 
     Ok(CompiledIfExpr { expr, vars })
 }
-
 
 // {% with %} / {% endwith %}
 
@@ -647,9 +645,8 @@ pub fn compile_verbatim(
 
 // {% spaceless %} / {% endspaceless %}
 
-static SPACELESS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r">\s+<").expect("SPACELESS_RE must compile")
-});
+static SPACELESS_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r">\s+<").expect("SPACELESS_RE must compile"));
 
 #[derive(Debug)]
 struct SpacelessNode {
@@ -805,10 +802,7 @@ impl Node for FirstOfNode {
     }
 }
 
-pub fn compile_firstof(
-    parser: &mut Parser,
-    token: &Token,
-) -> Result<Box<dyn Node>, TemplateError> {
+pub fn compile_firstof(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, TemplateError> {
     let bits = token.split_contents();
     if bits.len() < 2 {
         return Err(TemplateError::TemplateSyntaxError(
@@ -1132,9 +1126,9 @@ fn load_python_library<'py>(
     py: Python<'py>,
     name: &str,
 ) -> Result<Bound<'py, PyAny>, TemplateError> {
-    let lib_module = py
-        .import("django.template.library")
-        .map_err(|e| TemplateError::Internal(format!("Cannot import django.template.library: {e}")))?;
+    let lib_module = py.import("django.template.library").map_err(|e| {
+        TemplateError::Internal(format!("Cannot import django.template.library: {e}"))
+    })?;
     let import_library = lib_module
         .getattr("import_library")
         .map_err(|e| TemplateError::Internal(format!("Cannot get import_library: {e}")))?;
@@ -1148,29 +1142,34 @@ fn load_python_library<'py>(
     match import_library.call1((name,)) {
         Ok(lib) => Ok(lib),
         Err(_) => {
-            let backends = py.import("django.template.backends.django")
+            let backends = py
+                .import("django.template.backends.django")
                 .map_err(|e| TemplateError::Internal(format!("Cannot import backends: {e}")))?;
-            let get_installed = backends.getattr("get_installed_libraries")
-                .map_err(|e| TemplateError::Internal(format!("Cannot get get_installed_libraries: {e}")))?;
-            let installed = get_installed.call0()
-                .map_err(|e| TemplateError::Internal(format!("get_installed_libraries failed: {e}")))?;
+            let get_installed = backends.getattr("get_installed_libraries").map_err(|e| {
+                TemplateError::Internal(format!("Cannot get get_installed_libraries: {e}"))
+            })?;
+            let installed = get_installed.call0().map_err(|e| {
+                TemplateError::Internal(format!("get_installed_libraries failed: {e}"))
+            })?;
 
             match installed.get_item(name) {
                 Ok(full_path) => {
-                    let full_path_str: String = full_path.extract()
-                        .map_err(|e| TemplateError::Internal(format!("Cannot extract path: {e}")))?;
-                    import_library.call1((full_path_str.as_str(),))
-                        .map_err(|_| TemplateError::TemplateSyntaxError(format!(
-                            "'{}' is not a registered tag library. Could not import '{}'.",
-                            name, full_path_str,
-                        )))
+                    let full_path_str: String = full_path.extract().map_err(|e| {
+                        TemplateError::Internal(format!("Cannot extract path: {e}"))
+                    })?;
+                    import_library
+                        .call1((full_path_str.as_str(),))
+                        .map_err(|_| {
+                            TemplateError::TemplateSyntaxError(format!(
+                                "'{}' is not a registered tag library. Could not import '{}'.",
+                                name, full_path_str,
+                            ))
+                        })
                 }
-                Err(_) => {
-                    Err(TemplateError::TemplateSyntaxError(format!(
-                        "'{}' is not a registered tag library.",
-                        name,
-                    )))
-                }
+                Err(_) => Err(TemplateError::TemplateSyntaxError(format!(
+                    "'{}' is not a registered tag library.",
+                    name,
+                ))),
             }
         }
     }
@@ -1186,9 +1185,9 @@ fn register_library_tags(
     specific_tags: Option<&[String]>,
 ) -> Result<(), TemplateError> {
     if specific_tags.is_none() {
-        return parser.add_python_library(py, lib).map_err(|e| {
-            TemplateError::Internal(format!("add_python_library: {e}"))
-        });
+        return parser
+            .add_python_library(py, lib)
+            .map_err(|e| TemplateError::Internal(format!("add_python_library: {e}")));
     }
 
     // {% load tag1 tag2 from library %}: pull only named entries.
@@ -1251,37 +1250,47 @@ impl Node for NowNode {
         // Use Django's `date` filter so format names like DATE_FORMAT
         // resolve via django.utils.formats.date_format().
         let formatted: String = (|| {
-            let date_filter = py.import("django.template.defaultfilters")
+            let date_filter = py
+                .import("django.template.defaultfilters")
                 .map_err(|e| TemplateError::Internal(format!("Cannot import defaultfilters: {e}")))?
                 .getattr("date")
                 .map_err(|e| TemplateError::Internal(format!("Cannot get date filter: {e}")))?;
-            let datetime_mod = py.import("datetime")
+            let datetime_mod = py
+                .import("datetime")
                 .map_err(|e| TemplateError::Internal(format!("Cannot import datetime: {e}")))?;
-            let settings = py.import("django.conf")
+            let settings = py
+                .import("django.conf")
                 .map_err(|e| TemplateError::Internal(format!("{e}")))?
                 .getattr("settings")
                 .map_err(|e| TemplateError::Internal(format!("{e}")))?;
-            let use_tz = settings.getattr("USE_TZ")
+            let use_tz = settings
+                .getattr("USE_TZ")
                 .and_then(|v| v.extract::<bool>())
                 .unwrap_or(false);
             let now = if use_tz {
-                let tz_mod = py.import("django.utils.timezone")
+                let tz_mod = py
+                    .import("django.utils.timezone")
                     .map_err(|e| TemplateError::Internal(format!("{e}")))?;
-                let tz = tz_mod.call_method0("get_current_timezone")
+                let tz = tz_mod
+                    .call_method0("get_current_timezone")
                     .map_err(|e| TemplateError::Internal(format!("{e}")))?;
-                datetime_mod.getattr("datetime")
+                datetime_mod
+                    .getattr("datetime")
                     .map_err(|e| TemplateError::Internal(format!("{e}")))?
                     .call_method1("now", (&tz,))
                     .map_err(|e| TemplateError::Internal(format!("{e}")))?
             } else {
-                datetime_mod.getattr("datetime")
+                datetime_mod
+                    .getattr("datetime")
                     .map_err(|e| TemplateError::Internal(format!("{e}")))?
                     .call_method0("now")
                     .map_err(|e| TemplateError::Internal(format!("{e}")))?
             };
-            let result = date_filter.call1((&now, format_str.as_str()))
+            let result = date_filter
+                .call1((&now, format_str.as_str()))
                 .map_err(|e| TemplateError::Internal(format!("date filter failed: {e}")))?;
-            result.extract::<String>()
+            result
+                .extract::<String>()
                 .map_err(|e| TemplateError::Internal(format!("date filter result not string: {e}")))
         })()?;
 
@@ -1347,11 +1356,8 @@ impl Node for FilterNode {
         layer.insert("var".to_owned(), content);
         context.push_with(layer);
 
-        let result = crate::nodes::resolve_expression_ignore_failures(
-            py,
-            &self.filter_expr,
-            context,
-        );
+        let result =
+            crate::nodes::resolve_expression_ignore_failures(py, &self.filter_expr, context);
         context.pop();
 
         let val = result?;
@@ -1371,10 +1377,7 @@ impl Node for FilterNode {
     }
 }
 
-pub fn compile_filter(
-    parser: &mut Parser,
-    token: &Token,
-) -> Result<Box<dyn Node>, TemplateError> {
+pub fn compile_filter(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, TemplateError> {
     let bits = token.split_contents();
     if bits.len() < 2 {
         return Err(TemplateError::TemplateSyntaxError(
@@ -1606,8 +1609,7 @@ struct IfChangedNode {
     origin_field: Option<Origin>,
 }
 
-static IFCHANGED_COUNTER: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static IFCHANGED_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl Node for IfChangedNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
@@ -1792,9 +1794,7 @@ struct PartialNode {
     name: String,
     /// Shared with the parser. Lookup deferred to render time so
     /// forward references work.
-    partials: std::sync::Arc<
-        std::sync::Mutex<HashMap<String, std::sync::Arc<NodeList>>>,
-    >,
+    partials: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<NodeList>>>>,
     token_field: Option<Token>,
     origin_field: Option<Origin>,
 }
@@ -1802,9 +1802,10 @@ struct PartialNode {
 impl Node for PartialNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         let nodelist = {
-            let map = self.partials.lock().map_err(|_| {
-                TemplateError::Internal("partials map mutex poisoned".into())
-            })?;
+            let map = self
+                .partials
+                .lock()
+                .map_err(|_| TemplateError::Internal("partials map mutex poisoned".into()))?;
             map.get(&self.name).cloned()
         };
         let nodelist = nodelist.ok_or_else(|| {
@@ -1824,10 +1825,7 @@ impl Node for PartialNode {
     }
 }
 
-pub fn compile_partial(
-    parser: &mut Parser,
-    token: &Token,
-) -> Result<Box<dyn Node>, TemplateError> {
+pub fn compile_partial(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, TemplateError> {
     let bits = token.split_contents();
     if bits.len() != 2 {
         return Err(TemplateError::TemplateSyntaxError(
@@ -1913,7 +1911,10 @@ pub fn compile_resetcycle(
 
 /// Register all built-in template tags on the parser.
 pub fn register_default_tags(parser: &mut Parser) {
-    let tags: Vec<(&str, fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>)> = vec![
+    let tags: Vec<(
+        &str,
+        fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>,
+    )> = vec![
         ("if", compile_if),
         ("for", compile_for),
         ("with", compile_with),
@@ -1938,10 +1939,9 @@ pub fn register_default_tags(parser: &mut Parser) {
     ];
 
     for (name, func) in tags {
-        parser.tags.insert(
-            name.to_owned(),
-            TagCompileFunc::Rust(Box::new(func)),
-        );
+        parser
+            .tags
+            .insert(name.to_owned(), TagCompileFunc::Rust(Box::new(func)));
     }
 
     i18n_tags::register_i18n_tags(parser);
@@ -1964,10 +1964,7 @@ mod tests {
 
     fn render(source: &str, vars: Vec<(&str, Value)>) -> Result<String, TemplateError> {
         let nodelist = parse_template(source)?;
-        let ctx_dict: ContextDict = vars
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v))
-            .collect();
+        let ctx_dict: ContextDict = vars.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
         let mut context = Context::new(Some(ctx_dict));
         Python::attach(|py| {
             let safe = nodelist.render(py, &mut context)?;
@@ -1975,16 +1972,21 @@ mod tests {
         })
     }
 
-
     #[test]
     fn test_if_true() {
-        let result = render("{% if show %}yes{% endif %}", vec![("show", Value::Bool(true))]);
+        let result = render(
+            "{% if show %}yes{% endif %}",
+            vec![("show", Value::Bool(true))],
+        );
         assert_eq!(result.unwrap(), "yes");
     }
 
     #[test]
     fn test_if_false() {
-        let result = render("{% if show %}yes{% endif %}", vec![("show", Value::Bool(false))]);
+        let result = render(
+            "{% if show %}yes{% endif %}",
+            vec![("show", Value::Bool(false))],
+        );
         assert_eq!(result.unwrap(), "");
     }
 
@@ -2001,10 +2003,7 @@ mod tests {
     fn test_if_elif() {
         let result = render(
             "{% if a %}A{% elif b %}B{% else %}C{% endif %}",
-            vec![
-                ("a", Value::Bool(false)),
-                ("b", Value::Bool(true)),
-            ],
+            vec![("a", Value::Bool(false)), ("b", Value::Bool(true))],
         );
         assert_eq!(result.unwrap(), "B");
     }
@@ -2022,10 +2021,7 @@ mod tests {
     fn test_if_and() {
         let result = render(
             "{% if a and b %}both{% endif %}",
-            vec![
-                ("a", Value::Bool(true)),
-                ("b", Value::Bool(true)),
-            ],
+            vec![("a", Value::Bool(true)), ("b", Value::Bool(true))],
         );
         assert_eq!(result.unwrap(), "both");
     }
@@ -2034,20 +2030,14 @@ mod tests {
     fn test_if_or() {
         let result = render(
             "{% if a or b %}either{% endif %}",
-            vec![
-                ("a", Value::Bool(false)),
-                ("b", Value::Bool(true)),
-            ],
+            vec![("a", Value::Bool(false)), ("b", Value::Bool(true))],
         );
         assert_eq!(result.unwrap(), "either");
     }
 
     #[test]
     fn test_if_comparison() {
-        let result = render(
-            "{% if x == 1 %}one{% endif %}",
-            vec![("x", Value::Int(1))],
-        );
+        let result = render("{% if x == 1 %}one{% endif %}", vec![("x", Value::Int(1))]);
         assert_eq!(result.unwrap(), "one");
     }
 
@@ -2068,7 +2058,6 @@ mod tests {
         );
         assert_eq!(result.unwrap(), "nobody");
     }
-
 
     #[test]
     fn test_for_basic() {
@@ -2139,7 +2128,6 @@ mod tests {
         assert_eq!(result.unwrap(), "cba");
     }
 
-
     #[test]
     fn test_with_new_syntax() {
         let result = render(
@@ -2167,13 +2155,11 @@ mod tests {
         assert_eq!(result.unwrap(), "innerouter");
     }
 
-
     #[test]
     fn test_comment() {
         let result = render("before{% comment %}hidden{% endcomment %}after", vec![]);
         assert_eq!(result.unwrap(), "beforeafter");
     }
-
 
     #[test]
     fn test_autoescape_off() {
@@ -2193,7 +2179,6 @@ mod tests {
         assert_eq!(result.unwrap(), "&lt;b&gt;bold&lt;/b&gt;");
     }
 
-
     #[test]
     fn test_spaceless() {
         let result = render(
@@ -2202,7 +2187,6 @@ mod tests {
         );
         assert_eq!(result.unwrap(), "<p></p><p></p>");
     }
-
 
     #[test]
     fn test_templatetag_openblock() {
@@ -2215,7 +2199,6 @@ mod tests {
         let result = render("{% templatetag closevariable %}", vec![]);
         assert_eq!(result.unwrap(), "}}");
     }
-
 
     #[test]
     fn test_firstof_first_truthy() {
@@ -2241,7 +2224,6 @@ mod tests {
         );
         assert_eq!(result.unwrap(), "");
     }
-
 
     #[test]
     fn test_csrf_token() {
@@ -2280,19 +2262,22 @@ mod tests {
         assert!(output.contains("a&lt;b&gt;c"));
     }
 
-
     #[test]
     fn test_cycle_basic() {
         let result = render(
             "{% for item in items %}{% cycle 'a' 'b' 'c' %}{% endfor %}",
             vec![(
                 "items",
-                Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]),
+                Value::List(vec![
+                    Value::Int(1),
+                    Value::Int(2),
+                    Value::Int(3),
+                    Value::Int(4),
+                ]),
             )],
         );
         assert_eq!(result.unwrap(), "abca");
     }
-
 
     #[test]
     fn test_if_missing_argument() {
@@ -2318,7 +2303,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-
     #[test]
     fn test_value_is_truthy() {
         assert!(!value_is_truthy(&Value::None));
@@ -2332,7 +2316,6 @@ mod tests {
         assert!(value_is_truthy(&Value::List(vec![Value::Int(1)])));
     }
 
-
     #[test]
     fn test_strip_spaces_between_tags() {
         assert_eq!(strip_spaces_between_tags("<p> </p>"), "<p></p>");
@@ -2342,7 +2325,6 @@ mod tests {
         );
         assert_eq!(strip_spaces_between_tags("<p>text</p>"), "<p>text</p>");
     }
-
 
     #[test]
     fn test_widthratio_basic() {
@@ -2371,10 +2353,7 @@ mod tests {
 
     #[test]
     fn test_widthratio_as_var() {
-        let result = render(
-            "{% widthratio 175 200 100 as ratio %}{{ ratio }}",
-            vec![],
-        );
+        let result = render("{% widthratio 175 200 100 as ratio %}{{ ratio }}", vec![]);
         assert_eq!(result.unwrap(), "88");
     }
 
@@ -2389,7 +2368,6 @@ mod tests {
         let result = render("{% widthratio 50 100 100 %}", vec![]);
         assert_eq!(result.unwrap(), "50");
     }
-
 
     #[test]
     fn test_ifchanged_with_variable() {
@@ -2476,13 +2454,11 @@ mod tests {
         assert_eq!(result.unwrap(), "abc");
     }
 
-
     #[test]
     fn test_widthratio_too_few_args() {
         let result = parse_template("{% widthratio 175 200 %}");
         assert!(result.is_err());
     }
-
 
     #[test]
     fn test_ifchanged_parse_basic() {
@@ -2495,7 +2471,6 @@ mod tests {
         let result = parse_template("{% ifchanged x %}C{% else %}S{% endifchanged %}");
         assert!(result.is_ok());
     }
-
 
     #[test]
     fn test_cache_parse_basic() {
@@ -2514,7 +2489,6 @@ mod tests {
         let result = parse_template("{% cache 300 %}content{% endcache %}");
         assert!(result.is_err());
     }
-
 
     #[test]
     fn test_partialdef_parse_basic() {
@@ -2547,13 +2521,9 @@ mod tests {
 
     #[test]
     fn test_partialdef_non_inline_empty() {
-        let result = render(
-            "{% partialdef mypart %}hello{% endpartialdef %}",
-            vec![],
-        );
+        let result = render("{% partialdef mypart %}hello{% endpartialdef %}", vec![]);
         assert_eq!(result.unwrap(), "");
     }
-
 
     #[test]
     fn test_value_to_f64() {

@@ -7,13 +7,11 @@
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
 
 use crate::context::{Context, Value};
 use crate::errors::TemplateError;
 use crate::filters::{FilterId, NativeFilter, get_default_filters};
 use crate::nodes::{Node, render_value_in_context_into, value_from_pyany_fast};
-use crate::utils::html_escape_into;
 
 /// Body-program instruction. Stays small for tight jump-table dispatch.
 #[derive(Debug, Clone)]
@@ -27,7 +25,10 @@ pub enum Op {
     /// Read from `pre_filter_results[column_idx][current_row_index]`.
     EmitFilterColumn(u32),
     /// Truthiness test on the tuple slot.
-    JmpIfSlotFalsy { slot: u16, else_pc: u32 },
+    JmpIfSlotFalsy {
+        slot: u16,
+        else_pc: u32,
+    },
     Jmp(u32),
     /// Fall back to the original boxed Node at this NodeList index.
     InvokeNode(u32),
@@ -74,7 +75,11 @@ impl BodyProgram {
                 Some(a) => std::slice::from_ref(a),
                 None => &[],
             };
-            let ae = if col.needs_autoescape { autoescape } else { false };
+            let ae = if col.needs_autoescape {
+                autoescape
+            } else {
+                false
+            };
             for tup in tuples {
                 let bound = tup.bind(py);
                 let val = match bound.get_item(col.slot as usize) {
@@ -85,7 +90,9 @@ impl BodyProgram {
                     }
                 };
                 let input = value_from_pyany_fast(&val);
-                let mut result = col.filter_id.dispatch(&input, args_slice, ae, Some(col.native_fn));
+                let mut result =
+                    col.filter_id
+                        .dispatch(&input, args_slice, ae, Some(col.native_fn));
                 if col.is_safe_filter {
                     if let Value::String(s) = result {
                         result = Value::SafeString(Arc::from(s));
@@ -123,7 +130,6 @@ impl BodyProgram {
             cache.current_tuple.clone_ref(py)
         };
         let tuple = tuple_py.bind(py);
-        let autoescape = context.autoescape;
 
         let mut pc: usize = 0;
         let n = self.ops.len();
@@ -268,7 +274,10 @@ impl ProgramBuilder {
 }
 
 #[inline]
-fn values_eq(v: &Value) -> bool { let _ = v; true } // helper for the explicit compare
+fn values_eq(v: &Value) -> bool {
+    let _ = v;
+    true
+} // helper for the explicit compare
 
 /// Walk a NodeList, emitting `Op::InvokeNode(idx)` for entries we
 /// can't specialise. `false` only on structural failure.
@@ -392,11 +401,7 @@ fn compile_boxed_node(
 /// `{% if loopvar.path %}...[else]...{% endif %}` where condition is a
 /// single batched-slot reference (no and/or/not/comparison). Handles
 /// the common ~80% case; complex conditions stay on the slow path.
-fn compile_if(
-    builder: &mut ProgramBuilder,
-    if_node: &crate::tags::IfNode,
-    loopvar: &str,
-) -> bool {
+fn compile_if(builder: &mut ProgramBuilder, if_node: &crate::tags::IfNode, loopvar: &str) -> bool {
     // Support `if cond` and optional `else`. No elif.
     let branches = if_node.branches();
     if branches.is_empty() || branches.len() > 2 {

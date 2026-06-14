@@ -43,7 +43,11 @@ pub fn try_format(py: Python<'_>, dt: &Bound<'_, PyAny>, format_str: &str) -> Op
             'M' => out.push_str(MONTHS_SHORT[(cache.month(py)? - 1) as usize]),
             'F' => out.push_str(MONTHS_LONG[(cache.month(py)? - 1) as usize]),
             't' => write!(out, "{}", days_in_month(cache.year(py)?, cache.month(py)?)).ok()?,
-            'L' => out.push_str(if is_leap_year(cache.year(py)?) { "True" } else { "False" }),
+            'L' => out.push_str(if is_leap_year(cache.year(py)?) {
+                "True"
+            } else {
+                "False"
+            }),
 
             'Y' => write!(out, "{}", cache.year(py)?).ok()?,
             'y' => write!(out, "{:02}", cache.year(py)?.rem_euclid(100)).ok()?,
@@ -71,7 +75,14 @@ pub fn try_format(py: Python<'_>, dt: &Bound<'_, PyAny>, format_str: &str) -> Op
                     if m == 0 {
                         write!(out, "{} {}", h12, if h < 12 { "a.m." } else { "p.m." }).ok()?;
                     } else {
-                        write!(out, "{}:{:02} {}", h12, m, if h < 12 { "a.m." } else { "p.m." }).ok()?;
+                        write!(
+                            out,
+                            "{}:{:02} {}",
+                            h12,
+                            m,
+                            if h < 12 { "a.m." } else { "p.m." }
+                        )
+                        .ok()?;
                     }
                 }
             }
@@ -104,11 +115,31 @@ fn is_supported(format_str: &str) -> bool {
 fn is_format_char(c: char) -> bool {
     matches!(
         c,
-        'd' | 'j' | 'D' | 'l' | 'N' | 'S' | 'w' | 'z'
-            | 'm' | 'n' | 'M' | 'F' | 't' | 'L'
-            | 'Y' | 'y'
-            | 'H' | 'G' | 'h' | 'g' | 'i' | 's' | 'u'
-            | 'a' | 'A' | 'P'
+        'd' | 'j'
+            | 'D'
+            | 'l'
+            | 'N'
+            | 'S'
+            | 'w'
+            | 'z'
+            | 'm'
+            | 'n'
+            | 'M'
+            | 'F'
+            | 't'
+            | 'L'
+            | 'Y'
+            | 'y'
+            | 'H'
+            | 'G'
+            | 'h'
+            | 'g'
+            | 'i'
+            | 's'
+            | 'u'
+            | 'a'
+            | 'A'
+            | 'P'
     )
 }
 
@@ -243,25 +274,40 @@ impl<'a, 'py> ComponentCache<'a, 'py> {
 // Static tables matching Django's exact strings.
 
 const MONTHS_SHORT: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
 const MONTHS_LONG: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 
 /// AP-style abbreviations (Django's `N`).
 const MONTH_AP_STYLE: [&str; 12] = [
-    "Jan.", "Feb.", "March", "April", "May", "June",
-    "July", "Aug.", "Sept.", "Oct.", "Nov.", "Dec.",
+    "Jan.", "Feb.", "March", "April", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.",
+    "Dec.",
 ];
 
 /// Indexed by `w` (0=Sun..6=Sat).
 const DAY_NAMES_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAY_NAMES_LONG: [&str; 7] = [
-    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
 ];
 
 #[inline]
@@ -274,7 +320,13 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }

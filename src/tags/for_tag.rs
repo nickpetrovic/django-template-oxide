@@ -3,11 +3,9 @@
 //! `loopvar.path` references and resolve them via a single
 //! `operator.attrgetter(*paths)(item)` per iteration.
 
-use std::collections::HashMap;
-
 use pyo3::prelude::*;
 
-use crate::context::{Context, ContextDict, Value};
+use crate::context::{Context, Value};
 use crate::errors::TemplateError;
 use crate::impl_node_metadata;
 use crate::lexer::Token;
@@ -15,8 +13,8 @@ use crate::nodes::{Node, NodeList, Origin};
 use crate::parser::Parser;
 use crate::variable::FilterExpression;
 
-use super::resolve_if_value;
 use super::IfNode;
+use super::resolve_if_value;
 
 #[derive(Debug)]
 pub struct ForNode {
@@ -69,9 +67,9 @@ fn prebatch_extract_from_iterable(
     // `list(map(getter, iterable))` in one FFI hop.
     let mapped = map_fn.bind(py).call1((getter.bind(py), iterable))?;
     let result_list = list_fn.bind(py).call1((mapped,))?;
-    let result_list = result_list.cast::<PyList>().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err("expected list from list(map(...))")
-    })?;
+    let result_list = result_list
+        .cast::<PyList>()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("expected list from list(map(...))"))?;
 
     let mut out = Vec::with_capacity(result_list.len());
     for tup in result_list.iter() {
@@ -81,7 +79,9 @@ fn prebatch_extract_from_iterable(
 }
 
 /// Cached `builtins.map` / `builtins.list` to skip FFI lookups per prebatch.
-fn cached_map_list(py: pyo3::Python<'_>) -> pyo3::PyResult<(&'static Py<pyo3::PyAny>, &'static Py<pyo3::PyAny>)> {
+fn cached_map_list(
+    py: pyo3::Python<'_>,
+) -> pyo3::PyResult<(&'static Py<pyo3::PyAny>, &'static Py<pyo3::PyAny>)> {
     static MAP_FN: std::sync::OnceLock<Py<pyo3::PyAny>> = std::sync::OnceLock::new();
     static LIST_FN: std::sync::OnceLock<Py<pyo3::PyAny>> = std::sync::OnceLock::new();
 
@@ -375,23 +375,20 @@ impl ForNode {
         // Pre-extract via `list(map(attrgetter, iterable))`: one FFI
         // hop covering N items × M attrs. Source iterable used
         // directly (no PyList::append per item).
-        let pre_extracted: Option<Vec<Py<pyo3::PyAny>>> = match (
-            single_loopvar.as_ref(),
-            &self.batch_plan,
-            &seq_value,
-        ) {
-            (Some(_), Some(plan), Value::PyObject(obj)) => {
-                let bound = obj.bind(py);
-                // Skip batching for the rare reversed-loop case
-                // (alignment would require reversing iterable or result).
-                if self.is_reversed {
-                    None
-                } else {
-                    prebatch_extract_from_iterable(py, plan, &bound).ok()
+        let pre_extracted: Option<Vec<Py<pyo3::PyAny>>> =
+            match (single_loopvar.as_ref(), &self.batch_plan, &seq_value) {
+                (Some(_), Some(plan), Value::PyObject(obj)) => {
+                    let bound = obj.bind(py);
+                    // Skip batching for the rare reversed-loop case
+                    // (alignment would require reversing iterable or result).
+                    if self.is_reversed {
+                        None
+                    } else {
+                        prebatch_extract_from_iterable(py, plan, &bound).ok()
+                    }
                 }
-            }
-            _ => None,
-        };
+                _ => None,
+            };
 
         // Install the cache once; only `current_tuple` changes per iter.
         if let (Some(pre), Some(plan), Some(name)) = (
@@ -431,12 +428,24 @@ impl ForNode {
         for (i, item) in items.into_iter().enumerate() {
             if self.body_uses_forloop {
                 if let Some(Value::Dict(forloop)) = context.get_in_topmost_mut("forloop") {
-                    if let Some((_, v)) = forloop.get_index_mut(0) { *v = Value::Int((i + 1) as i64); }
-                    if let Some((_, v)) = forloop.get_index_mut(1) { *v = Value::Int(i as i64); }
-                    if let Some((_, v)) = forloop.get_index_mut(2) { *v = Value::Int((len - i) as i64); }
-                    if let Some((_, v)) = forloop.get_index_mut(3) { *v = Value::Int((len - i - 1) as i64); }
-                    if let Some((_, v)) = forloop.get_index_mut(4) { *v = Value::Bool(i == 0); }
-                    if let Some((_, v)) = forloop.get_index_mut(5) { *v = Value::Bool(i == len - 1); }
+                    if let Some((_, v)) = forloop.get_index_mut(0) {
+                        *v = Value::Int((i + 1) as i64);
+                    }
+                    if let Some((_, v)) = forloop.get_index_mut(1) {
+                        *v = Value::Int(i as i64);
+                    }
+                    if let Some((_, v)) = forloop.get_index_mut(2) {
+                        *v = Value::Int((len - i) as i64);
+                    }
+                    if let Some((_, v)) = forloop.get_index_mut(3) {
+                        *v = Value::Int((len - i - 1) as i64);
+                    }
+                    if let Some((_, v)) = forloop.get_index_mut(4) {
+                        *v = Value::Bool(i == 0);
+                    }
+                    if let Some((_, v)) = forloop.get_index_mut(5) {
+                        *v = Value::Bool(i == len - 1);
+                    }
                 }
             }
 
@@ -474,7 +483,8 @@ impl ForNode {
                     }
                     Value::String(s) => {
                         // String unpacking: iterate characters
-                        let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
+                        let chars: Vec<Value> =
+                            s.chars().map(|c| Value::String(c.to_string())).collect();
                         if chars.len() != num_loopvars {
                             context.pop();
                             return Err(TemplateError::PythonError(
@@ -490,7 +500,8 @@ impl ForNode {
                         }
                     }
                     Value::SafeString(s) => {
-                        let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
+                        let chars: Vec<Value> =
+                            s.chars().map(|c| Value::String(c.to_string())).collect();
                         if chars.len() != num_loopvars {
                             context.pop();
                             return Err(TemplateError::PythonError(
@@ -570,14 +581,7 @@ impl ForNode {
                     // signature simple and avoid per-iter allocation.
                     let column_refs: Vec<&[crate::context::Value]> =
                         pre_columns.iter().map(|v| v.as_slice()).collect();
-                    program.run(
-                        py,
-                        context,
-                        out,
-                        &self.nodelist_loop,
-                        &column_refs,
-                        i,
-                    )?;
+                    program.run(py, context, out, &self.nodelist_loop, &column_refs, i)?;
                     true
                 } else {
                     false
@@ -642,14 +646,11 @@ pub fn compile_for(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
 
     let is_reversed = bits.last().map_or(false, |s| s == "reversed");
 
-    let in_index = bits
-        .iter()
-        .position(|s| s == "in")
-        .ok_or_else(|| {
-            TemplateError::TemplateSyntaxError(
-                "'for' statements should use the format 'for x in y': missing 'in'.".into(),
-            )
-        })?;
+    let in_index = bits.iter().position(|s| s == "in").ok_or_else(|| {
+        TemplateError::TemplateSyntaxError(
+            "'for' statements should use the format 'for x in y': missing 'in'.".into(),
+        )
+    })?;
 
     // Loopvars: comma-separated between `for` and `in`.
     let loopvars_str = bits[1..in_index].join(" ");
@@ -666,7 +667,11 @@ pub fn compile_for(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
     }
 
     // Sequence: between `in` and optional `reversed`.
-    let seq_end = if is_reversed { bits.len() - 1 } else { bits.len() };
+    let seq_end = if is_reversed {
+        bits.len() - 1
+    } else {
+        bits.len()
+    };
     let sequence_token = bits[in_index + 1..seq_end].join(" ");
     let sequence = parser.compile_filter(&sequence_token)?;
 
@@ -716,10 +721,7 @@ pub fn compile_for(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
 fn nodelist_references_forloop(nodelist: &NodeList) -> bool {
     fn token_needs_forloop(node: &dyn Node) -> bool {
         node.token()
-            .map(|t| {
-                t.contents.contains("forloop")
-                    || t.contents.starts_with("ifchanged")
-            })
+            .map(|t| t.contents.contains("forloop") || t.contents.starts_with("ifchanged"))
             .unwrap_or(false)
     }
 

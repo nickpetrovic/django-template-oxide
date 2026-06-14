@@ -60,8 +60,9 @@ impl Node for UrlNode {
             } else {
                 let dict = pyo3::types::PyDict::new(py);
                 for (k, v) in &kwargs {
-                    dict.set_item(k, v.to_pyobject(py))
-                        .map_err(|e| TemplateError::Internal(format!("Failed to set kwarg: {e}")))?;
+                    dict.set_item(k, v.to_pyobject(py)).map_err(|e| {
+                        TemplateError::Internal(format!("Failed to set kwarg: {e}"))
+                    })?;
                 }
                 Some(dict)
             };
@@ -87,36 +88,31 @@ impl Node for UrlNode {
                 let bound = request_obj.bind(py);
                 let current_app = match bound.getattr("current_app") {
                     Ok(val) => Some(val),
-                    Err(_) => {
-                        match bound.getattr("resolver_match") {
-                            Ok(rm) if !rm.is_none() => {
-                                rm.getattr("namespace").ok()
-                            }
-                            _ => None,
-                        }
-                    }
+                    Err(_) => match bound.getattr("resolver_match") {
+                        Ok(rm) if !rm.is_none() => rm.getattr("namespace").ok(),
+                        _ => None,
+                    },
                 };
                 if let Some(ref app) = current_app {
                     let _ = call_kwargs.set_item("current_app", app);
                 }
             }
 
-            let result = reverse
-                .call((), Some(&call_kwargs))
-                .map_err(|e| {
-                    // Check if this is a NoReverseMatch exception and
-                    // propagate it directly so callers can catch it.
-                    let is_no_reverse = py.import("django.urls")
-                        .ok()
-                        .and_then(|m| m.getattr("NoReverseMatch").ok())
-                        .map(|cls| e.is_instance(py, &cls))
-                        .unwrap_or(false);
-                    if is_no_reverse {
-                        TemplateError::PythonError(e)
-                    } else {
-                        TemplateError::Internal(format!("reverse() failed: {e}"))
-                    }
-                })?;
+            let result = reverse.call((), Some(&call_kwargs)).map_err(|e| {
+                // Check if this is a NoReverseMatch exception and
+                // propagate it directly so callers can catch it.
+                let is_no_reverse = py
+                    .import("django.urls")
+                    .ok()
+                    .and_then(|m| m.getattr("NoReverseMatch").ok())
+                    .map(|cls| e.is_instance(py, &cls))
+                    .unwrap_or(false);
+                if is_no_reverse {
+                    TemplateError::PythonError(e)
+                } else {
+                    TemplateError::Internal(format!("reverse() failed: {e}"))
+                }
+            })?;
             result
                 .extract::<String>()
                 .map_err(|e| TemplateError::Internal(format!("reverse() result not a string: {e}")))

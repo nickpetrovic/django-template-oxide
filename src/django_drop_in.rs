@@ -3,8 +3,8 @@
 //! interact with our engine as if it were Django's own. Proxies are
 //! zero-cost when unused.
 
-use pyo3::prelude::*;
 use pyo3::intern;
+use pyo3::prelude::*;
 use pyo3::types::PyString;
 use std::sync::OnceLock;
 
@@ -16,7 +16,12 @@ use crate::nodes::{Node, NodeList, Origin};
 /// Python proxy for `django.template.base.Token` (base.py:358-403).
 /// Carries a copy of the Rust `Token` fields so the Rust side may
 /// advance the stream without invalidating a `PyToken` handed to Python.
-#[pyclass(name = "Token", module = "django_template_oxide._rust", frozen)]
+#[pyclass(
+    name = "Token",
+    module = "django_template_oxide._rust",
+    frozen,
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyToken {
     token_type_obj: Py<PyAny>,
@@ -61,8 +66,7 @@ impl PyToken {
 
     /// Mirrors `base.py:390-403`: preserves `_("...")` translation markers.
     fn split_contents(&self) -> Vec<String> {
-        Token::new(self.kind, self.contents_rust.clone(), None, self.lineno)
-            .split_contents()
+        Token::new(self.kind, self.contents_rust.clone(), None, self.lineno).split_contents()
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {
@@ -152,10 +156,7 @@ where
 {
     let mut placeholder = Context::new(None);
     std::mem::swap(context, &mut placeholder);
-    let py_ctx = Py::new(
-        py,
-        crate::py_bindings::PyContext { inner: placeholder },
-    )?;
+    let py_ctx = Py::new(py, crate::py_bindings::PyContext { inner: placeholder })?;
 
     let result = f(py_ctx.bind(py).clone());
 
@@ -461,7 +462,10 @@ impl PyParser {
     fn prepend_token(&self, token: &PyToken) {
         let parser = unsafe { &mut *self.parser_ptr };
         let pos = token.position.map(|(start, _end)| start);
-        let source_len = token.position.map(|(start, end)| end - start).unwrap_or(token.contents_rust.len());
+        let source_len = token
+            .position
+            .map(|(start, end)| end - start)
+            .unwrap_or(token.contents_rust.len());
         let rust_token = Token::new(token.kind, token.contents_rust.clone(), pos, token.lineno)
             .with_source_len(source_len);
         parser.prepend_token(rust_token);
@@ -480,11 +484,7 @@ impl PyParser {
     }
 
     /// Returns a `PyFilterExpression` (`.resolve(context)`-able).
-    fn compile_filter(
-        &self,
-        py: Python<'_>,
-        token_string: &str,
-    ) -> PyResult<Py<PyAny>> {
+    fn compile_filter(&self, py: Python<'_>, token_string: &str) -> PyResult<Py<PyAny>> {
         let parser = unsafe { &*self.parser_ptr };
         let fe = parser
             .compile_filter(token_string)
@@ -496,12 +496,7 @@ impl PyParser {
     /// Mirrors `base.py:619-630`. Returns the exception (callers do
     /// `raise parser.error(...)`). We don't round-trip Tokens onto
     /// `.token` since third-party code rarely reads it.
-    fn error(
-        &self,
-        py: Python<'_>,
-        _token: &PyToken,
-        e: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn error(&self, py: Python<'_>, _token: &PyToken, e: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if e.is_instance_of::<pyo3::exceptions::PyBaseException>() {
             return Ok(e.clone().unbind());
         }
@@ -612,10 +607,7 @@ impl PyParser {
     }
 }
 
-#[pyclass(
-    name = "FilterExpression",
-    module = "django_template_oxide._rust"
-)]
+#[pyclass(name = "FilterExpression", module = "django_template_oxide._rust")]
 pub struct PyFilterExpression {
     pub inner: crate::variable::FilterExpression,
 }
@@ -630,11 +622,13 @@ impl PyFilterExpression {
         context: &Bound<'_, PyAny>,
         ignore_failures: bool,
     ) -> PyResult<Py<PyAny>> {
-        let py_ctx = context.cast::<crate::py_bindings::PyContext>().map_err(|_| {
-            pyo3::exceptions::PyTypeError::new_err(
-                "FilterExpression.resolve: context must be a django_template_oxide.Context",
-            )
-        })?;
+        let py_ctx = context
+            .cast::<crate::py_bindings::PyContext>()
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "FilterExpression.resolve: context must be a django_template_oxide.Context",
+                )
+            })?;
         let borrowed = py_ctx.borrow();
         let value = if ignore_failures {
             crate::nodes::resolve_expression_ignore_failures(py, &self.inner, &borrowed.inner)
@@ -683,10 +677,13 @@ impl PyFilterExpression {
             for arg in &parsed.args {
                 args.append(format!("{:?}", arg))?;
             }
-            let tup = pyo3::types::PyTuple::new(py, [
-                parsed.name.clone().into_pyobject(py)?.into_any().unbind(),
-                args.unbind().into_any(),
-            ])?;
+            let tup = pyo3::types::PyTuple::new(
+                py,
+                [
+                    parsed.name.clone().into_pyobject(py)?.into_any().unbind(),
+                    args.unbind().into_any(),
+                ],
+            )?;
             list.append(tup)?;
         }
         Ok(list.unbind())

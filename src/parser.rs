@@ -82,9 +82,7 @@ pub struct Parser {
     /// `{% partialdef %}` fragments; `Arc<Mutex>` so PartialDefNode
     /// (writes) and PartialNode (reads) share without lifetime issues.
     /// Mirrors `parser.extra_data.setdefault("partials", {})`.
-    pub partials: std::sync::Arc<
-        std::sync::Mutex<HashMap<String, std::sync::Arc<NodeList>>>,
-    >,
+    pub partials: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<NodeList>>>>,
 }
 
 impl std::fmt::Debug for Parser {
@@ -120,7 +118,6 @@ impl Parser {
         }
     }
 
-
     /// Mirrors `Parser.parse()`. Parses until a `parse_until` command
     /// or end of stream.
     pub fn parse(&mut self, parse_until: &[&str]) -> Result<NodeList, TemplateError> {
@@ -146,8 +143,9 @@ impl Parser {
                         ));
                     }
 
-                    let filter_expression =
-                        self.compile_filter(&token.contents).map_err(|e| self.error(&token, e))?;
+                    let filter_expression = self
+                        .compile_filter(&token.contents)
+                        .map_err(|e| self.error(&token, e))?;
 
                     // Resolve each filter's Python callable; placeholder
                     // `None` for native-only filters (renderer detects).
@@ -162,10 +160,8 @@ impl Parser {
                             .collect()
                     });
 
-                    let mut node = Box::new(VariableNode::with_filters(
-                        filter_expression,
-                        filter_funcs,
-                    ));
+                    let mut node =
+                        Box::new(VariableNode::with_filters(filter_expression, filter_funcs));
                     // Inline extend_nodelist's metadata to keep the
                     // concrete `Box<VariableNode>` for `push_variable`.
                     node.set_token(token.clone());
@@ -221,10 +217,8 @@ impl Parser {
                             // SAFETY: pointer to a live HashMap value; we
                             // don't insert/remove from `self.tags` during
                             // the call so no reallocation invalidates it.
-                            let rust_fn_ref: &RustTagCompileFn =
-                                unsafe { &*rust_fn_ptr };
-                            rust_fn_ref(self, &token)
-                                .map_err(|e| self.error(&token, e))?
+                            let rust_fn_ref: &RustTagCompileFn = unsafe { &*rust_fn_ptr };
+                            rust_fn_ref(self, &token).map_err(|e| self.error(&token, e))?
                         }
                         TagCompileFunc::Python(py_fn) => {
                             let py_fn_clone = Python::attach(|py| py_fn.clone_ref(py));
@@ -330,11 +324,9 @@ impl Parser {
         use pyo3::types::PyDict;
 
         let tags_attr = lib.getattr(pyo3::intern!(py, "tags"))?;
-        let tags_dict = tags_attr.cast::<PyDict>().map_err(|_| {
-            pyo3::exceptions::PyTypeError::new_err(
-                "Library.tags must be a dict",
-            )
-        })?;
+        let tags_dict = tags_attr
+            .cast::<PyDict>()
+            .map_err(|_| pyo3::exceptions::PyTypeError::new_err("Library.tags must be a dict"))?;
         for (name, compile_fn) in tags_dict.iter() {
             let name_str: String = name.extract()?;
             let py_fn = compile_fn.unbind();
@@ -348,18 +340,14 @@ impl Parser {
             // breaks against our non-iterable PyNodeList. New tags from
             // the library still merge; custom `{% load %}` tags are
             // distinct from Django's defaults so this is benign.
-            if let std::collections::hash_map::Entry::Vacant(slot) =
-                self.tags.entry(name_str)
-            {
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.tags.entry(name_str) {
                 slot.insert(TagCompileFunc::Python(py_fn));
             }
         }
 
         let filters_attr = lib.getattr(pyo3::intern!(py, "filters"))?;
         let filters_dict = filters_attr.cast::<PyDict>().map_err(|_| {
-            pyo3::exceptions::PyTypeError::new_err(
-                "Library.filters must be a dict",
-            )
+            pyo3::exceptions::PyTypeError::new_err("Library.filters must be a dict")
         })?;
         for (name, filter_fn) in filters_dict.iter() {
             let name_str: String = name.extract()?;
@@ -434,10 +422,7 @@ impl Parser {
                 )
             }
             None => {
-                format!(
-                    "Invalid block tag on line {}: '{}'.",
-                    token.lineno, command,
-                )
+                format!("Invalid block tag on line {}: '{}'.", token.lineno, command,)
             }
         };
         self.error(token, TemplateError::TemplateSyntaxError(msg))
@@ -479,9 +464,7 @@ fn dispatch_python_compile_fn(
             crate::django_drop_in::PyToken::from_rust_token(py, token)?,
         )?;
 
-        let node_obj = py_compile_fn
-            .bind(py)
-            .call1((&py_parser, &py_token))?;
+        let node_obj = py_compile_fn.bind(py).call1((&py_parser, &py_token))?;
 
         // Mirrors Django's `Parser.parse` which does
         //   node.token = token
@@ -500,8 +483,7 @@ fn dispatch_python_compile_fn(
             let _ = node_obj.setattr(pyo3::intern!(py, "origin"), py_origin);
         }
 
-        Ok(Box::new(crate::django_drop_in::PyOpaqueNode::new(node_obj.unbind()))
-            as Box<dyn Node>)
+        Ok(Box::new(crate::django_drop_in::PyOpaqueNode::new(node_obj.unbind())) as Box<dyn Node>)
     })
     .map_err(TemplateError::from)
 }
@@ -513,11 +495,9 @@ mod tests {
     use super::*;
     use crate::lexer::{Lexer, Token, TokenType};
 
-
     fn lex(template: &str) -> Vec<Token> {
         Lexer::new(template).tokenize()
     }
-
 
     #[test]
     fn test_parse_text_only() {
@@ -535,7 +515,6 @@ mod tests {
         let nodelist = parser.parse(&[]).unwrap();
         assert!(nodelist.is_empty());
     }
-
 
     #[test]
     fn test_parse_simple_variable() {
@@ -574,7 +553,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_unknown_block_tag_errors() {
         let tokens = lex("{% unknown %}");
@@ -603,7 +581,6 @@ mod tests {
             other => panic!("expected TemplateSyntaxError, got {:?}", other),
         }
     }
-
 
     #[test]
     fn test_parse_until_stops_at_expected_tag() {
@@ -641,7 +618,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_next_token_and_prepend() {
         let tokens = vec![
@@ -671,7 +647,6 @@ mod tests {
         assert_eq!(next.contents, "b");
     }
 
-
     #[test]
     fn test_comments_are_discarded() {
         let tokens = lex("before{# comment #}after");
@@ -681,7 +656,6 @@ mod tests {
         // The comment token should be silently skipped.
         assert_eq!(nodelist.len(), 2); // "before" and "after"
     }
-
 
     #[test]
     fn test_registered_tag_is_called() {
@@ -721,7 +695,6 @@ mod tests {
         assert_eq!(nodelist.len(), 1);
     }
 
-
     #[test]
     fn test_find_filter_missing() {
         let parser = Parser::new(vec![]);
@@ -745,7 +718,6 @@ mod tests {
         assert!(fe.filters.is_empty());
     }
 
-
     #[test]
     fn test_invalid_block_tag_with_expected() {
         let tokens = lex("{% bogus %}");
@@ -768,7 +740,6 @@ mod tests {
             other => panic!("expected TemplateSyntaxError, got {:?}", other),
         }
     }
-
 
     #[test]
     fn test_origin_set_on_nodes() {

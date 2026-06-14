@@ -4,7 +4,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use indexmap::IndexMap;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyNone, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 // FxHash-style hasher for short string context keys. ~3-5x faster than
 // SipHash13 for trusted, non-adversarial keys. Not HashDoS resistant;
@@ -343,9 +343,7 @@ impl Value {
             Value::Bool(b) => b.into_pyobject(py).unwrap().to_owned().into_any().unbind(),
             Value::Int(n) => n.into_pyobject(py).unwrap().into_any().unbind(),
             Value::Float(n) => n.into_pyobject(py).unwrap().into_any().unbind(),
-            Value::String(s) => {
-                s.into_pyobject(py).unwrap().into_any().unbind()
-            }
+            Value::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
             Value::SafeString(s) => {
                 // mark_safe so SafeData status survives the round-trip.
                 let as_str: &str = s.as_ref();
@@ -360,8 +358,7 @@ impl Value {
                 as_str.into_pyobject(py).unwrap().into_any().unbind()
             }
             Value::List(items) => {
-                let list =
-                    PyList::new(py, items.iter().map(|v| v.to_pyobject(py))).unwrap();
+                let list = PyList::new(py, items.iter().map(|v| v.to_pyobject(py))).unwrap();
                 list.into_any().unbind()
             }
             Value::Dict(map) => {
@@ -517,8 +514,7 @@ impl BaseContext {
     /// Like Django's `__getitem__` (raises KeyError).
     #[inline]
     pub fn get_or_err(&self, key: &str) -> Result<&Value, ContextKeyError> {
-        self.get(key)
-            .ok_or_else(|| ContextKeyError(key.to_owned()))
+        self.get(key).ok_or_else(|| ContextKeyError(key.to_owned()))
     }
 
     /// Set in the topmost dict. Matches `__setitem__`.
@@ -870,7 +866,7 @@ impl RenderKey {
     /// String-like keys become `Str`; others become `PyObject` with
     /// cached `__hash__`.
     pub fn from_py(key: &Bound<'_, PyAny>) -> PyResult<Self> {
-        if let Ok(s) = key.downcast::<PyString>() {
+        if let Ok(s) = key.cast::<PyString>() {
             return Ok(RenderKey::Str(s.to_str()?.to_owned()));
         }
         let hash = key.hash()?;
@@ -912,9 +908,7 @@ impl PartialEq for RenderKey {
                 if a.is(b) {
                     return true;
                 }
-                Python::attach(|py| {
-                    a.bind(py).eq(b.bind(py)).unwrap_or(false)
-                })
+                Python::attach(|py| a.bind(py).eq(b.bind(py)).unwrap_or(false))
             }
             _ => false,
         }
@@ -1001,8 +995,7 @@ impl RenderContext {
     }
 
     pub fn get_or_err(&self, key: &str) -> Result<&Value, ContextKeyError> {
-        self.get(key)
-            .ok_or_else(|| ContextKeyError(key.to_owned()))
+        self.get(key).ok_or_else(|| ContextKeyError(key.to_owned()))
     }
 
     pub fn get_key(&self, key: &RenderKey) -> Option<&Value> {
@@ -1025,9 +1018,7 @@ impl RenderContext {
 
     pub fn contains(&self, key: &str) -> bool {
         let probe = RenderKey::Str(key.to_owned());
-        self.dicts
-            .last()
-            .is_some_and(|d| d.contains_key(&probe))
+        self.dicts.last().is_some_and(|d| d.contains_key(&probe))
     }
 
     /// Returns `true` if `key` is present in the **topmost** dict only.
@@ -1096,7 +1087,6 @@ impl Default for RenderContext {
 mod tests {
     use super::*;
 
-
     fn val_int(n: i64) -> Value {
         Value::Int(n)
     }
@@ -1111,7 +1101,6 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
     }
-
 
     #[test]
     fn test_basic_push_pop_get() {
@@ -1180,7 +1169,6 @@ mod tests {
         assert_eq!(ctx2.get_or_err("x").unwrap(), &val_int(5));
     }
 
-
     #[test]
     fn test_variable_shadowing() {
         let mut ctx = BaseContext::with_values(dict_from(&[("x", val_str("outer"))]));
@@ -1205,7 +1193,6 @@ mod tests {
         ctx.pop();
         assert_eq!(ctx.get("a"), Some(&val_int(1)));
     }
-
 
     #[test]
     fn test_render_context_top_only_get() {
@@ -1249,7 +1236,6 @@ mod tests {
         rc.pop();
     }
 
-
     #[test]
     fn test_builtins_available() {
         let ctx = BaseContext::new();
@@ -1276,7 +1262,6 @@ mod tests {
         assert_eq!(flat.get("False"), Some(&Value::Bool(false)));
         assert_eq!(flat.get("None"), Some(&Value::None));
     }
-
 
     #[test]
     fn test_set_upward_existing_key() {
@@ -1321,7 +1306,6 @@ mod tests {
         assert_eq!(ctx.get("a"), Some(&val_int(1)));
     }
 
-
     #[test]
     fn test_flatten_merges_all_dicts() {
         let mut ctx = BaseContext::new();
@@ -1346,11 +1330,12 @@ mod tests {
         assert_eq!(flat.get("a"), Some(&val_int(99)));
     }
 
-
     #[test]
     fn test_context_push_pop() {
-        let mut c =
-            Context::new(Some(dict_from(&[("a", val_int(1)), ("b", val_str("xyzzy"))])));
+        let mut c = Context::new(Some(dict_from(&[
+            ("a", val_int(1)),
+            ("b", val_str("xyzzy")),
+        ])));
 
         assert_eq!(c.get("a"), Some(&val_int(1)));
 
@@ -1415,7 +1400,6 @@ mod tests {
         assert_ne!(a, b);
     }
 
-
     #[test]
     fn test_setdefault() {
         let mut ctx = BaseContext::new();
@@ -1429,7 +1413,6 @@ mod tests {
         assert_eq!(v, &val_int(42));
         assert_eq!(ctx.get("x"), Some(&val_int(42)));
     }
-
 
     #[test]
     fn test_render_context_push_state_isolated() {
@@ -1457,7 +1440,6 @@ mod tests {
         });
     }
 
-
     #[test]
     fn test_value_from_primitives() {
         assert_eq!(Value::from(true), Value::Bool(true));
@@ -1483,7 +1465,6 @@ mod tests {
         assert_ne!(Value::Int(1), Value::String("1".into()));
     }
 
-
     #[test]
     fn test_base_context_len() {
         let ctx = BaseContext::new();
@@ -1501,7 +1482,6 @@ mod tests {
         let ctx2 = BaseContext::with_values(dict_from(&[("a", val_int(1))]));
         assert!(!ctx2.is_empty());
     }
-
 
     #[test]
     fn test_reset_dicts() {
@@ -1526,11 +1506,10 @@ mod tests {
         assert_eq!(ctx.get("True"), Some(&Value::Bool(true)));
     }
 
-
     #[test]
     fn test_value_from_python_none() {
         Python::attach(|py| {
-            let binding = PyNone::get(py);
+            let binding = pyo3::types::PyNone::get(py);
             let none = binding.as_any();
             let v = Value::from(none);
             assert_eq!(v, Value::None);

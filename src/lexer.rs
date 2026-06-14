@@ -6,9 +6,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 /// Django's `tag_re`: `{%...%}` / `{{...}}` / `{#...#}` (non-greedy).
-static TAG_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(\{%.*?%\}|\{\{.*?\}\}|\{#.*?#\})").expect("TAG_RE must compile")
-});
+static TAG_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\{%.*?%\}|\{\{.*?\}\}|\{#.*?#\})").expect("TAG_RE must compile"));
 
 /// Django's `smart_split_re` (django.utils.text): quoted runs or
 /// non-whitespace runs.
@@ -202,10 +201,7 @@ impl Lexer {
                     return Token::new(TokenType::Var, content, position, lineno);
                 }
 
-                debug_assert!(
-                    token_start == "{#",
-                    "unexpected tag start: {token_start:?}"
-                );
+                debug_assert!(token_start == "{#", "unexpected tag start: {token_start:?}");
                 return Token::new(TokenType::Comment, content, position, lineno);
             }
         }
@@ -284,10 +280,7 @@ impl DebugLexer {
                         .with_source_len(token_string.len());
                 }
 
-                debug_assert!(
-                    token_start == "{#",
-                    "unexpected tag start: {token_start:?}"
-                );
+                debug_assert!(token_start == "{#", "unexpected tag start: {token_start:?}");
                 return Token::new(TokenType::Comment, content, position, lineno)
                     .with_source_len(token_string.len());
             }
@@ -318,7 +311,6 @@ fn split_keeping_delimiters(re: &Regex, text: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_basic_var_token() {
         let mut lexer = Lexer::new("Hello {{ name }}");
@@ -343,7 +335,6 @@ mod tests {
         assert_eq!(tokens[0].contents, "Hello world");
     }
 
-
     #[test]
     fn test_block_tag() {
         let mut lexer = Lexer::new("{% if x %}yes{% endif %}");
@@ -360,7 +351,6 @@ mod tests {
         assert_eq!(tokens[2].token_type, TokenType::Block);
         assert_eq!(tokens[2].contents, "endif");
     }
-
 
     #[test]
     fn test_comment_token() {
@@ -385,7 +375,6 @@ mod tests {
         assert_eq!(tokens[2].token_type, TokenType::Text);
         assert_eq!(tokens[2].contents, "after");
     }
-
 
     #[test]
     fn test_verbatim_basic() {
@@ -454,7 +443,6 @@ mod tests {
         assert_eq!(tokens[2].token_type, TokenType::Block);
     }
 
-
     #[test]
     fn test_smart_split_simple() {
         assert_eq!(smart_split("hello world"), vec!["hello", "world"]);
@@ -504,7 +492,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-
     #[test]
     fn test_lineno_tracking() {
         let input = "line1\n{{ var }}\nline3";
@@ -535,7 +522,6 @@ mod tests {
         assert_eq!(tokens[1].token_type, TokenType::Var);
     }
 
-
     #[test]
     fn test_debug_lexer_positions() {
         let input = "Hello {{ name }}";
@@ -561,7 +547,6 @@ mod tests {
         assert_eq!(tokens[1].position, Some(10));
         assert_eq!(tokens[2].position, Some(13));
     }
-
 
     #[test]
     fn test_split_contents_basic() {
@@ -593,12 +578,8 @@ mod tests {
             1,
         );
         let parts = token.split_contents();
-        assert_eq!(
-            parts,
-            vec!["trans", "_('hello world')", "as", "greeting"]
-        );
+        assert_eq!(parts, vec!["trans", "_('hello world')", "as", "greeting"]);
     }
-
 
     #[test]
     fn test_split_keeping_delimiters() {
@@ -618,7 +599,6 @@ mod tests {
         assert_eq!(parts, vec!["", "{{ a }}", "", "{{ b }}", ""]);
     }
 
-
     #[test]
     fn test_all_token_types() {
         let input = "text{{ var }}{% block %}{# comment #}";
@@ -631,7 +611,6 @@ mod tests {
         assert_eq!(tokens[2].token_type, TokenType::Block);
         assert_eq!(tokens[3].token_type, TokenType::Comment);
     }
-
 
     #[test]
     fn test_empty_template() {

@@ -34,9 +34,8 @@ fn build_filter_pattern() -> String {
     )
 }
 
-static FILTER_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(&build_filter_pattern()).expect("filter regex must compile")
-});
+static FILTER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(&build_filter_pattern()).expect("filter regex must compile"));
 
 /// Parsed `Variable`: literal (number/string) or dotted lookup chain.
 #[derive(Debug, Clone)]
@@ -149,15 +148,17 @@ impl Variable {
     }
 
     /// Mirrors `Variable.resolve(context)`.
-    pub fn resolve<'py>(&self, py: Python<'py>, context: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    pub fn resolve<'py>(
+        &self,
+        py: Python<'py>,
+        context: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let value = match &self.value {
             VariableValue::Int(n) => n.into_pyobject(py)?.into_any(),
             VariableValue::Float(f) => f.into_pyobject(py)?.into_any(),
             VariableValue::StringLiteral(s) => {
                 // mark_safe per Django.
-                let mark_safe = py
-                    .import("django.utils.safestring")?
-                    .getattr("mark_safe")?;
+                let mark_safe = py.import("django.utils.safestring")?.getattr("mark_safe")?;
                 mark_safe.call1((s.as_str(),))?
             }
             VariableValue::Lookups(_) => self.resolve_lookup(py, context)?,
@@ -230,13 +231,11 @@ impl Variable {
                     if !current_type.hasattr("__getitem__").unwrap_or(false) {
                         return Err(());
                     }
-                    current
-                        .get_item(&bit_py)
-                        .map_err(|e| {
-                            // Swallow TypeError, AttributeError, KeyError,
-                            // ValueError, IndexError - fall through.
-                            let _ = e;
-                        })
+                    current.get_item(&bit_py).map_err(|e| {
+                        // Swallow TypeError, AttributeError, KeyError,
+                        // ValueError, IndexError - fall through.
+                        let _ = e;
+                    })
                 })();
 
                 current = match dict_result {
@@ -247,15 +246,13 @@ impl Variable {
                             // Guard: don't return class attributes if current
                             // is a BaseContext.
                             if current.is_instance(&base_context_cls)?
-                                && current
-                                    .get_type()
-                                    .getattr(bit_py.clone())
-                                    .is_ok()
+                                && current.get_type().getattr(bit_py.clone()).is_ok()
                             {
                                 return Err(PyTypeError::new_err("skip"));
                             }
                             current.getattr(bit_py.clone()).map_err(Into::into)
-                        })();
+                        })(
+                        );
 
                         match attr_result {
                             Ok(val) => val,
@@ -273,22 +270,16 @@ impl Variable {
 
                                 // Step 3: int-index lookup.
                                 match bit.parse::<i64>() {
-                                    Ok(idx) => {
-                                        match current.get_item(idx) {
-                                            Ok(val) => val,
-                                            Err(_) => {
-                                                return Err(TemplateError::VariableDoesNotExist {
-                                                    msg: "Failed lookup for key [%s] in %r"
-                                                        .to_owned(),
-                                                    params: vec![
-                                                        bit.clone(),
-                                                        repr_py(&current),
-                                                    ],
-                                                }
-                                                .into());
+                                    Ok(idx) => match current.get_item(idx) {
+                                        Ok(val) => val,
+                                        Err(_) => {
+                                            return Err(TemplateError::VariableDoesNotExist {
+                                                msg: "Failed lookup for key [%s] in %r".to_owned(),
+                                                params: vec![bit.clone(), repr_py(&current)],
                                             }
+                                            .into());
                                         }
-                                    }
+                                    },
                                     Err(_) => {
                                         return Err(TemplateError::VariableDoesNotExist {
                                             msg: "Failed lookup for key [%s] in %r".to_owned(),
@@ -484,12 +475,10 @@ fn handle_callable_type_error<'py>(
 
     match signature_fn.call1((callable,)) {
         Err(_) => get_string_if_invalid(py, context),
-        Ok(sig) => {
-            match sig.call_method0("bind") {
-                Err(_) => get_string_if_invalid(py, context),
-                Ok(_) => Err(original_err),
-            }
-        }
+        Ok(sig) => match sig.call_method0("bind") {
+            Err(_) => get_string_if_invalid(py, context),
+            Ok(_) => Err(original_err),
+        },
     }
 }
 
@@ -547,7 +536,9 @@ fn unescape_string_literal(s: &str) -> Option<String> {
     let quote = first as char;
     let inner = &s[1..s.len() - 1];
     let escaped_quote = format!("\\{}", quote);
-    let result = inner.replace(&escaped_quote, &quote.to_string()).replace("\\\\", "\\");
+    let result = inner
+        .replace(&escaped_quote, &quote.to_string())
+        .replace("\\\\", "\\");
     Some(result)
 }
 
@@ -648,7 +639,8 @@ impl FilterExpression {
                                         var_obj = Some(FilterExpressionVar::Var(v));
                                         is_var = false;
                                     } else {
-                                        var_obj = Some(FilterExpressionVar::Constant(Some(s.clone())));
+                                        var_obj =
+                                            Some(FilterExpressionVar::Constant(Some(s.clone())));
                                         is_var = false;
                                     }
                                 }
@@ -766,21 +758,18 @@ impl FilterExpression {
                     match v.resolve(py, context) {
                         Ok(val) => val,
                         Err(e) => {
-                            let is_vdne = e.is_instance_of::<crate::errors::VariableDoesNotExist>(py);
+                            let is_vdne =
+                                e.is_instance_of::<crate::errors::VariableDoesNotExist>(py);
                             if is_vdne {
                                 if ignore_failures {
                                     py.None().into_bound(py)
                                 } else {
-                                    let string_if_invalid =
-                                        get_string_if_invalid(py, context)?;
+                                    let string_if_invalid = get_string_if_invalid(py, context)?;
                                     let sii_str: String = string_if_invalid.extract()?;
                                     if !sii_str.is_empty() {
                                         if sii_str.contains("%s") {
-                                            let formatted =
-                                                sii_str.replace("%s", &v.var);
-                                            return Ok(
-                                                formatted.into_pyobject(py)?.into_any()
-                                            );
+                                            let formatted = sii_str.replace("%s", &v.var);
+                                            return Ok(formatted.into_pyobject(py)?.into_any());
                                         } else {
                                             return Ok(string_if_invalid);
                                         }
@@ -892,7 +881,6 @@ impl std::fmt::Display for FilterExpression {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_parse_integer() {
         let v = Variable::new("42").unwrap();
@@ -960,7 +948,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_double_quoted_string() {
         let v = Variable::new(r#""hello world""#).unwrap();
@@ -1006,7 +993,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_simple_variable() {
         let v = Variable::new("article").unwrap();
@@ -1040,7 +1026,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_translate_double_quoted() {
         let v = Variable::new(r#"_("hello")"#).unwrap();
@@ -1072,7 +1057,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_reject_leading_underscore() {
         let err = Variable::new("_private").unwrap_err();
@@ -1100,7 +1084,11 @@ mod tests {
         let err = Variable::new("a+b").unwrap_err();
         match err {
             TemplateError::TemplateSyntaxError(msg) => {
-                assert!(msg.contains("Invalid character"), "unexpected message: {}", msg);
+                assert!(
+                    msg.contains("Invalid character"),
+                    "unexpected message: {}",
+                    msg
+                );
                 assert!(msg.contains('+'), "unexpected message: {}", msg);
             }
             other => panic!("expected TemplateSyntaxError, got {:?}", other),
@@ -1112,13 +1100,16 @@ mod tests {
         let err = Variable::new("a-b").unwrap_err();
         match err {
             TemplateError::TemplateSyntaxError(msg) => {
-                assert!(msg.contains("Invalid character"), "unexpected message: {}", msg);
+                assert!(
+                    msg.contains("Invalid character"),
+                    "unexpected message: {}",
+                    msg
+                );
                 assert!(msg.contains('-'), "unexpected message: {}", msg);
             }
             other => panic!("expected TemplateSyntaxError, got {:?}", other),
         }
     }
-
 
     #[test]
     fn test_unescape_not_quoted() {
@@ -1152,7 +1143,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_filter_regex_compiles() {
         // Ensure the lazy regex initializes without panic.
@@ -1173,10 +1163,8 @@ mod tests {
 
     #[test]
     fn test_parse_filter_expression_simple_var() {
-        let fe = FilterExpression::parse("variable", |_name| {
-            unreachable!("no filters expected")
-        })
-        .unwrap();
+        let fe = FilterExpression::parse("variable", |_name| unreachable!("no filters expected"))
+            .unwrap();
         assert!(fe.is_var);
         assert!(fe.filters.is_empty());
         assert_eq!(fe.token, "variable");
@@ -1212,10 +1200,7 @@ mod tests {
         assert_eq!(fe.filters[0].name, "default");
         assert_eq!(fe.filters[0].args.len(), 1);
         assert!(!fe.filters[0].args[0].is_lookup);
-        assert_eq!(
-            fe.filters[0].args[0].constant.as_deref(),
-            Some("fallback")
-        );
+        assert_eq!(fe.filters[0].args[0].constant.as_deref(), Some("fallback"));
     }
 
     #[test]
@@ -1291,7 +1276,6 @@ mod tests {
             other => panic!("expected TemplateSyntaxError, got {:?}", other),
         }
     }
-
 
     #[test]
     fn test_variable_display() {

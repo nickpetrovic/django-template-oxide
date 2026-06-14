@@ -77,9 +77,7 @@ impl Template {
         let tokens = {
             let _g = crate::prof::Guard::new("compile_nodelist:tokenize");
             let use_python_lexer = engine.map_or(false, |eng| {
-                Python::attach(|py| {
-                    needs_python_lexer(py, eng).unwrap_or(false)
-                })
+                Python::attach(|py| needs_python_lexer(py, eng).unwrap_or(false))
             });
             if use_python_lexer {
                 Python::attach(|py| -> Result<Vec<crate::lexer::Token>, TemplateError> {
@@ -228,8 +226,8 @@ fn py_tokenize_via_django(
             .map_err(|e| TemplateError::Internal(format!("tokens not iterable: {e}")))?;
         let mut v = Vec::new();
         for tok_result in py_token_iter {
-            let tok = tok_result
-                .map_err(|e| TemplateError::Internal(format!("iterate tokens: {e}")))?;
+            let tok =
+                tok_result.map_err(|e| TemplateError::Internal(format!("iterate tokens: {e}")))?;
             v.push(extract_token(
                 py,
                 &tok,
@@ -305,9 +303,7 @@ fn extract_token(
         Err(_) => (None, None),
     };
 
-    let mut token = crate::lexer::Token::new(
-        token_type, contents, position, lineno,
-    );
+    let mut token = crate::lexer::Token::new(token_type, contents, position, lineno);
     if let Some(sl) = source_len {
         token = token.with_source_len(sl);
     }
@@ -329,7 +325,6 @@ pub fn render_to_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_compile_text_only() {
@@ -393,7 +388,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_render_text_only() {
         Python::attach(|py| {
@@ -426,13 +420,7 @@ mod tests {
     #[test]
     fn test_render_multiple_variables() {
         Python::attach(|py| {
-            let t = Template::new(
-                "{{ greeting }}, {{ name }}!",
-                None,
-                false,
-                None,
-            )
-            .unwrap();
+            let t = Template::new("{{ greeting }}, {{ name }}!", None, false, None).unwrap();
             let mut vars = HashMap::new();
             vars.insert("greeting".to_owned(), Value::String("Hi".to_owned()));
             vars.insert("name".to_owned(), Value::String("Bob".to_owned()));
@@ -463,7 +451,6 @@ mod tests {
         });
     }
 
-
     #[test]
     fn test_render_to_string_basic() {
         let mut vars = HashMap::new();
@@ -480,8 +467,7 @@ mod tests {
 
     #[test]
     fn test_render_to_string_with_comment() {
-        let output =
-            render_to_string("A{# hidden #}B", HashMap::new()).unwrap();
+        let output = render_to_string("A{# hidden #}B", HashMap::new()).unwrap();
         assert_eq!(output, "AB");
     }
 }

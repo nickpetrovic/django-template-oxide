@@ -7,10 +7,10 @@ use pyo3::prelude::*;
 
 use crate::context::{Context, Value};
 use crate::errors::TemplateError;
-use crate::lexer::Token;
-use crate::utils::{html_escape, SafeString};
-use crate::variable::FilterExpression;
 use crate::filters::get_default_filters;
+use crate::lexer::Token;
+use crate::utils::{SafeString, html_escape};
+use crate::variable::FilterExpression;
 
 /// Origin name for templates from non-loader sources. Matches Django's
 /// `django.template.base.UNKNOWN_SOURCE`.
@@ -42,7 +42,11 @@ fn attach_template_debug(
     }
 
     // Get the template from render_context (set by conftest / Django's push_state).
-    let template_obj = context.render_context.template.as_ref().map(|t| t.obj.bind(py));
+    let template_obj = context
+        .render_context
+        .template
+        .as_ref()
+        .map(|t| t.obj.bind(py));
     let template_obj = match template_obj {
         Some(t) => t,
         None => {
@@ -286,11 +290,16 @@ impl NodeList {
 
     /// Render to a single shared buffer. Mirrors `NodeList.render` but
     /// uses `render_annotated_into` to avoid per-child allocations.
-    pub fn render(&self, py: Python<'_>, context: &mut Context) -> Result<SafeString, TemplateError> {
+    pub fn render(
+        &self,
+        py: Python<'_>,
+        context: &mut Context,
+    ) -> Result<SafeString, TemplateError> {
         let _g = crate::prof::Guard::new("NodeList::render");
 
         // Pre-size: known text bytes + 16 per non-text node.
-        let estimated = self.text_bytes
+        let estimated = self
+            .text_bytes
             .saturating_add(self.nodes.len().saturating_mul(16));
         let mut parts = String::with_capacity(estimated);
 
@@ -314,7 +323,13 @@ impl NodeList {
                 NodeEntry::Variable(var_node) => {
                     if let Err(e) = var_node.render_annotated_into(py, context, out) {
                         if debug {
-                            return Err(attach_template_debug(py, e, var_node.token(), var_node.origin(), context));
+                            return Err(attach_template_debug(
+                                py,
+                                e,
+                                var_node.token(),
+                                var_node.origin(),
+                                context,
+                            ));
                         }
                         return Err(e);
                     }
@@ -322,7 +337,13 @@ impl NodeList {
                 NodeEntry::Boxed(node) => {
                     if let Err(e) = node.render_annotated_into(py, context, out) {
                         if debug {
-                            return Err(attach_template_debug(py, e, node.token(), node.origin(), context));
+                            return Err(attach_template_debug(
+                                py,
+                                e,
+                                node.token(),
+                                node.origin(),
+                                context,
+                            ));
                         }
                         return Err(e);
                     }
@@ -359,11 +380,6 @@ impl Default for NodeList {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Byte length of a TextNode via `as_text_bytes`, or `None` otherwise.
-fn text_node_byte_len(node: &dyn Node) -> Option<usize> {
-    node.as_text_bytes().map(|s| s.len())
 }
 
 /// Literal text node. Mirrors `django.template.base.TextNode`. Text is
@@ -456,7 +472,11 @@ impl std::fmt::Debug for VariableNode {
             .field("native_filter_ids", &self.native_filter_ids)
             .field(
                 "native_filter_cache_resolved",
-                &self.native_filter_cache.iter().filter(|n| n.is_some()).count(),
+                &self
+                    .native_filter_cache
+                    .iter()
+                    .filter(|n| n.is_some())
+                    .count(),
             )
             .field("token_field", &self.token_field)
             .field("origin_field", &self.origin_field)
@@ -466,15 +486,13 @@ impl std::fmt::Debug for VariableNode {
 
 impl Clone for VariableNode {
     fn clone(&self) -> Self {
-        Python::attach(|py| {
-            Self {
-                filter_expression: self.filter_expression.clone(),
-                filter_funcs: self.filter_funcs.iter().map(|f| f.clone_ref(py)).collect(),
-                native_filter_cache: self.native_filter_cache.clone(),
-                native_filter_ids: self.native_filter_ids.clone(),
-                token_field: self.token_field.clone(),
-                origin_field: self.origin_field.clone(),
-            }
+        Python::attach(|py| Self {
+            filter_expression: self.filter_expression.clone(),
+            filter_funcs: self.filter_funcs.iter().map(|f| f.clone_ref(py)).collect(),
+            native_filter_cache: self.native_filter_cache.clone(),
+            native_filter_ids: self.native_filter_ids.clone(),
+            token_field: self.token_field.clone(),
+            origin_field: self.origin_field.clone(),
         })
     }
 }
@@ -530,8 +548,7 @@ impl Node for VariableNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         if self.filter_expression.filters.is_empty() {
             let output = resolve_variable_rust(py, &self.filter_expression, context)?;
-            render_value_in_context_checked(&output, context)
-                .map_err(TemplateError::PythonError)
+            render_value_in_context_checked(&output, context).map_err(TemplateError::PythonError)
         } else {
             let output = resolve_with_filters_rust_cached(
                 py,
@@ -541,8 +558,7 @@ impl Node for VariableNode {
                 Some(&self.native_filter_ids),
                 Some(&self.filter_funcs),
             )?;
-            render_value_in_context_checked(&output, context)
-                .map_err(TemplateError::PythonError)
+            render_value_in_context_checked(&output, context).map_err(TemplateError::PythonError)
         }
     }
 
@@ -640,24 +656,7 @@ pub fn resolve_expression_ignore_failures(
     context: &Context,
 ) -> Result<Value, TemplateError> {
     if fe.filters.is_empty() {
-        // Temporarily treat missing vars as empty-string, not
-        // string_if_invalid, so we can detect the miss and return None.
-        let saved_sii = &context.string_if_invalid;
-        let empty_ctx;
-        let resolve_ctx = if !saved_sii.is_empty() && fe.is_var {
-            // Create a view with blank string_if_invalid.
-            // SAFETY: resolve_base_variable only reads the field.
-            empty_ctx = "";
-            // We can't mutate context (shared ref), so create a
-            // shallow copy that overrides string_if_invalid.
-            // Instead, just resolve with the normal context and
-            // check whether the result matches string_if_invalid.
-            &context
-        } else {
-            &context
-        };
-
-        let mut val = resolve_base_variable(py, fe, resolve_ctx)?;
+        let mut val = resolve_base_variable(py, fe, context)?;
         if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
             if variable.translate {
                 val = apply_translation_rust(py, &val, variable.message_context.as_deref())?;
@@ -672,10 +671,8 @@ pub fn resolve_expression_ignore_failures(
                     // If the resolved value equals what string_if_invalid
                     // would produce, the variable was missing.
                     if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
-                        let expected = format_invalid_message(
-                            &context.string_if_invalid,
-                            &variable.var,
-                        );
+                        let expected =
+                            format_invalid_message(&context.string_if_invalid, &variable.var);
                         if s == &expected {
                             return Ok(Value::None);
                         }
@@ -696,11 +693,7 @@ pub fn resolve_expression_ignore_failures(
 /// string per Django's semantics. First-segment miss falls back to
 /// int/float parsing of the full var_name.
 #[inline]
-fn resolve_lookup_arg_native(
-    py: Python<'_>,
-    context: &Context,
-    var_name: &str,
-) -> Value {
+fn resolve_lookup_arg_native(py: Python<'_>, context: &Context, var_name: &str) -> Value {
     let mut parts = var_name.split('.');
     let first = parts.next().expect("split yields at least one item");
     let head = match context.get(first) {
@@ -881,11 +874,7 @@ fn resolve_base_variable(
                         &context.string_if_invalid,
                     );
                 }
-                return resolve_pyobject_callable(
-                    py,
-                    head,
-                    &context.string_if_invalid,
-                );
+                return resolve_pyobject_callable(py, head, &context.string_if_invalid);
             }
 
             // Walk Rust Dict/List by borrowed reference; only the leaf
@@ -906,11 +895,7 @@ fn resolve_base_variable(
                         }
                     },
                     Value::List(items) => {
-                        match part
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|idx| items.get(idx))
-                        {
+                        match part.parse::<usize>().ok().and_then(|idx| items.get(idx)) {
                             Some(v) => {
                                 cur = v;
                             }
@@ -925,28 +910,24 @@ fn resolve_base_variable(
                     // String/SafeString/PyObject are terminal: return
                     // directly so the loop body keeps walking &Value.
                     Value::String(s) => {
-                        return Ok(
-                            string_index_lookup(s.as_str(), part, false).unwrap_or_else(
-                                || {
-                                    Value::String(format_invalid_message(
-                                        &context.string_if_invalid,
-                                        &variable.var,
-                                    ))
-                                },
-                            ),
-                        );
+                        return Ok(string_index_lookup(s.as_str(), part, false).unwrap_or_else(
+                            || {
+                                Value::String(format_invalid_message(
+                                    &context.string_if_invalid,
+                                    &variable.var,
+                                ))
+                            },
+                        ));
                     }
                     Value::SafeString(s) => {
-                        return Ok(
-                            string_index_lookup(s.as_ref(), part, true).unwrap_or_else(
-                                || {
-                                    Value::String(format_invalid_message(
-                                        &context.string_if_invalid,
-                                        &variable.var,
-                                    ))
-                                },
-                            ),
-                        );
+                        return Ok(string_index_lookup(s.as_ref(), part, true).unwrap_or_else(
+                            || {
+                                Value::String(format_invalid_message(
+                                    &context.string_if_invalid,
+                                    &variable.var,
+                                ))
+                            },
+                        ));
                     }
                     Value::PyObject(obj) => {
                         return resolve_pyobject_lookups(
@@ -989,7 +970,7 @@ fn resolve_pyobject_lookups(
     string_if_invalid: &str,
 ) -> Result<Value, TemplateError> {
     let _g = crate::prof::Guard::new("resolve_pyobject_lookups");
-    use pyo3::types::{PyDict, PyList, PyString, PyTuple};
+    use pyo3::types::{PyDict, PyList, PyTuple};
 
     let mut current = start.clone();
 
@@ -1030,11 +1011,12 @@ fn resolve_pyobject_lookups(
                     // Django auto-calls callables from dict lookups
                     // (test_basic_syntax38).
                     if !is_primitive_or_collection(&current) && current.is_callable() {
-                        maybe_call_template_callable(py, &mut current, string_if_invalid)
-                            .map_err(|e| match e {
+                        maybe_call_template_callable(py, &mut current, string_if_invalid).map_err(
+                            |e| match e {
                                 TemplateError::PythonError(pe) => Some(pe),
                                 _ => None,
-                            })?;
+                            },
+                        )?;
                     }
                     continue;
                 }
@@ -1099,9 +1081,7 @@ fn resolve_pyobject_lookups(
                                 .ok()
                                 .map(|dir_list| {
                                     dir_list.iter().any(|item| {
-                                        item.extract::<String>()
-                                            .map(|s| s == *bit)
-                                            .unwrap_or(false)
+                                        item.extract::<String>().map(|s| s == *bit).unwrap_or(false)
                                     })
                                 })
                                 .unwrap_or(false);
@@ -1160,17 +1140,19 @@ fn resolve_pyobject_lookups(
                                 let inspect = py.import("inspect").map_err(Some)?;
                                 let sig_fn = inspect.getattr("signature").map_err(Some)?;
                                 match sig_fn.call1((&current,)) {
-                                    Ok(sig) => {
-                                        match sig.call_method0("bind") {
-                                            Err(_) => {
-                                                let sii = string_if_invalid.into_pyobject(py).unwrap().into_any();
-                                                return Ok(sii);
-                                            }
-                                            Ok(_) => return Err(Some(call_err)),
+                                    Ok(sig) => match sig.call_method0("bind") {
+                                        Err(_) => {
+                                            let sii = string_if_invalid
+                                                .into_pyobject(py)
+                                                .unwrap()
+                                                .into_any();
+                                            return Ok(sii);
                                         }
-                                    }
+                                        Ok(_) => return Err(Some(call_err)),
+                                    },
                                     Err(_) => {
-                                        let sii = string_if_invalid.into_pyobject(py).unwrap().into_any();
+                                        let sii =
+                                            string_if_invalid.into_pyobject(py).unwrap().into_any();
                                         return Ok(sii);
                                     }
                                 }
@@ -1222,9 +1204,7 @@ fn resolve_pyobject_lookups(
                 .and_then(|v| v.is_truthy().ok())
                 .unwrap_or(false);
 
-            if silent
-                || e.is_instance_of::<pyo3::exceptions::PyKeyError>(py)
-            {
+            if silent || e.is_instance_of::<pyo3::exceptions::PyKeyError>(py) {
                 Ok(Value::String(string_if_invalid.to_owned()))
             } else {
                 Err(TemplateError::PythonError(e))
@@ -1457,19 +1437,6 @@ pub fn value_from_pyany_fast(val: &Bound<'_, pyo3::PyAny>) -> Value {
     Value::from(val)
 }
 
-fn dir_contains_str(dir_list: &Bound<'_, pyo3::PyAny>, name: &str) -> bool {
-    if let Ok(list) = dir_list.cast::<pyo3::types::PyList>() {
-        for item in list.iter() {
-            if let Ok(s) = item.extract::<String>() {
-                if s == name {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 /// Resolve a `FilterExpression` applying filters natively in Rust.
 fn resolve_with_filters_rust(
     py: Python<'_>,
@@ -1506,34 +1473,28 @@ fn call_python_filter(
     let was_safe = matches!(obj, Value::SafeString(_));
 
     let result = if needs_autoescape {
-        let mut all_args: Vec<Bound<'_, pyo3::PyAny>> =
-            Vec::with_capacity(1 + py_args.len());
+        let mut all_args: Vec<Bound<'_, pyo3::PyAny>> = Vec::with_capacity(1 + py_args.len());
         all_args.push(py_obj.into_bound(py));
         for a in py_args {
             all_args.push(a.into_bound(py));
         }
-        let args_tuple = pyo3::types::PyTuple::new(py, &all_args)
-            .map_err(<PyErr as From<_>>::from)?;
+        let args_tuple =
+            pyo3::types::PyTuple::new(py, &all_args).map_err(<PyErr as From<_>>::from)?;
         let kwargs = pyo3::types::PyDict::new(py);
         kwargs
-            .set_item(
-                pyo3::intern!(py, "autoescape"),
-                context.autoescape,
-            )
+            .set_item(pyo3::intern!(py, "autoescape"), context.autoescape)
             .map_err(<PyErr as From<_>>::from)?;
         func.call(args_tuple, Some(&kwargs))
             .map_err(<PyErr as From<_>>::from)?
     } else {
-        let mut all_args: Vec<Bound<'_, pyo3::PyAny>> =
-            Vec::with_capacity(1 + py_args.len());
+        let mut all_args: Vec<Bound<'_, pyo3::PyAny>> = Vec::with_capacity(1 + py_args.len());
         all_args.push(py_obj.into_bound(py));
         for a in py_args {
             all_args.push(a.into_bound(py));
         }
-        let args_tuple = pyo3::types::PyTuple::new(py, &all_args)
-            .map_err(<PyErr as From<_>>::from)?;
-        func.call1(args_tuple)
-            .map_err(<PyErr as From<_>>::from)?
+        let args_tuple =
+            pyo3::types::PyTuple::new(py, &all_args).map_err(<PyErr as From<_>>::from)?;
+        func.call1(args_tuple).map_err(<PyErr as From<_>>::from)?
     };
 
     // Preserve safety when both input was safe and filter is_safe.
@@ -1570,18 +1531,16 @@ fn is_value_safe(value: &Value) -> bool {
                     .and_then(|s| s.is_instance(cls.bind(py)))
                     .unwrap_or(false);
                 let mut guard = cache.borrow_mut();
-                let entry = guard
-                    .entry(type_ptr)
-                    .or_insert_with(|| {
-                        (
-                            py_type.clone().unbind(),
-                            TypeBehavior {
-                                supports_getitem: false,
-                                is_callable: false,
-                                is_safe_data: None,
-                            },
-                        )
-                    });
+                let entry = guard.entry(type_ptr).or_insert_with(|| {
+                    (
+                        py_type.clone().unbind(),
+                        TypeBehavior {
+                            supports_getitem: false,
+                            is_callable: false,
+                            is_safe_data: None,
+                        },
+                    )
+                });
                 entry.1.is_safe_data = Some(is_safe);
                 is_safe
             })
@@ -1593,7 +1552,9 @@ fn is_value_safe(value: &Value) -> bool {
 /// Cached `SafeData` class (via `python_cache::django`). `None` only
 /// if Django itself fails to import.
 fn safedata_class(py: Python<'_>) -> Option<&'static Py<pyo3::PyAny>> {
-    crate::python_cache::django(py).ok().map(|dj| &dj.safe_data_cls)
+    crate::python_cache::django(py)
+        .ok()
+        .map(|dj| &dj.safe_data_cls)
 }
 
 /// Resolve a single filter argument (var lookup, translatable literal,
@@ -1637,10 +1598,7 @@ fn resolve_filter_arg(
         Ok(val)
     } else {
         // Constant: cached at parse time; clone is an Arc bump.
-        Ok(arg
-            .cached_constant()
-            .cloned()
-            .unwrap_or(Value::None))
+        Ok(arg.cached_constant().cloned().unwrap_or(Value::None))
     }
 }
 
@@ -1720,8 +1678,7 @@ fn resolve_with_filters_inner(
 
     for (idx, parsed_filter) in fe.filters.iter().enumerate() {
         let n_args = parsed_filter.args.len();
-        let mut stack_args: [Value; 4] =
-            [Value::None, Value::None, Value::None, Value::None];
+        let mut stack_args: [Value; 4] = [Value::None, Value::None, Value::None, Value::None];
         let mut heap_args: Vec<Value> = Vec::new();
         let arg_vals: &[Value] = if n_args <= 4 {
             for (i, arg) in parsed_filter.args.iter().enumerate() {
@@ -1964,10 +1921,7 @@ fn render_pyobject_via_django(
     out: &mut String,
 ) {
     let py = bound.py();
-    let rendered = render_value_in_context(
-        &Value::PyObject(bound.clone().unbind()),
-        context,
-    );
+    let rendered = render_value_in_context(&Value::PyObject(bound.clone().unbind()), context);
     let _ = py;
     out.push_str(&rendered);
 }
@@ -1985,7 +1939,6 @@ mod tests {
             .collect()
     }
 
-
     #[test]
     fn test_origin_display() {
         let o = Origin::new("templates/base.html");
@@ -2000,7 +1953,6 @@ mod tests {
         assert_eq!(o.template_name.as_deref(), Some("base.html"));
         assert_eq!(o.loader.as_deref(), Some("filesystem"));
     }
-
 
     #[test]
     fn test_text_node_render() {
@@ -2033,18 +1985,12 @@ mod tests {
         assert!(node.token().is_none());
         assert!(node.origin().is_none());
 
-        node.set_token(Token::new(
-            crate::lexer::TokenType::Text,
-            "text",
-            None,
-            1,
-        ));
+        node.set_token(Token::new(crate::lexer::TokenType::Text, "text", None, 1));
         node.set_origin(Origin::new("test.html"));
 
         assert!(node.token().is_some());
         assert!(node.origin().is_some());
     }
-
 
     #[test]
     fn test_nodelist_render_joins() {
@@ -2100,7 +2046,6 @@ mod tests {
         assert_eq!(nl.len(), 1);
     }
 
-
     #[test]
     fn test_render_value_autoescape_on() {
         let ctx = Context::new(None); // autoescape=true by default
@@ -2146,7 +2091,6 @@ mod tests {
         let ctx = Context::new(None);
         assert_eq!(render_value_in_context(&Value::Bool(true), &ctx), "True");
     }
-
 
     #[test]
     fn test_variable_node_render_simple() {

@@ -21,17 +21,12 @@ pyo3::create_exception!(
     pyo3::exceptions::PyException
 );
 
-
-
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
     /// `msg` is printf-style; `params` are substitutions
     /// (`VariableDoesNotExist(msg, params)` per Django).
     #[error("{}", format_msg(.msg, .params))]
-    VariableDoesNotExist {
-        msg: String,
-        params: Vec<String>,
-    },
+    VariableDoesNotExist { msg: String, params: Vec<String> },
 
     #[error("{0}")]
     TemplateSyntaxError(String),
@@ -55,16 +50,17 @@ pub enum TemplateError {
 impl Clone for TemplateError {
     fn clone(&self) -> Self {
         match self {
-            Self::VariableDoesNotExist { msg, params } => {
-                Self::VariableDoesNotExist { msg: msg.clone(), params: params.clone() }
-            }
+            Self::VariableDoesNotExist { msg, params } => Self::VariableDoesNotExist {
+                msg: msg.clone(),
+                params: params.clone(),
+            },
             Self::TemplateSyntaxError(s) => Self::TemplateSyntaxError(s.clone()),
-            Self::TemplateDoesNotExist { msg, tried, chain } => {
-                Self::TemplateDoesNotExist { msg: msg.clone(), tried: tried.clone(), chain: chain.clone() }
-            }
-            Self::PythonError(e) => {
-                Self::PythonError(Python::attach(|py| e.clone_ref(py)))
-            }
+            Self::TemplateDoesNotExist { msg, tried, chain } => Self::TemplateDoesNotExist {
+                msg: msg.clone(),
+                tried: tried.clone(),
+                chain: chain.clone(),
+            },
+            Self::PythonError(e) => Self::PythonError(Python::attach(|py| e.clone_ref(py))),
             Self::Internal(s) => Self::Internal(s.clone()),
         }
     }
@@ -73,7 +69,8 @@ impl Clone for TemplateError {
 /// Python-`%`-style formatting for the `%s` / `%r` / `%d` patterns
 /// Django uses. `%%` still collapses to `%` with no params.
 fn format_msg(msg: &str, params: &[String]) -> String {
-    let mut result = String::with_capacity(msg.len() + params.iter().map(|p| p.len()).sum::<usize>());
+    let mut result =
+        String::with_capacity(msg.len() + params.iter().map(|p| p.len()).sum::<usize>());
     let mut chars = msg.chars().peekable();
     let mut param_idx = 0;
 
@@ -110,44 +107,38 @@ impl From<TemplateError> for PyErr {
     fn from(err: TemplateError) -> PyErr {
         match err {
             TemplateError::PythonError(e) => e,
-            TemplateError::Internal(msg) => {
-                pyo3::exceptions::PyRuntimeError::new_err(msg)
-            }
-            other => Python::attach(|py| {
-                match crate::python_cache::django(py) {
-                    Ok(dj) => {
-                        let (cls, msg) = match &other {
-                            TemplateError::VariableDoesNotExist { .. } => {
-                                (&dj.variable_does_not_exist_cls, other.to_string())
-                            }
-                            TemplateError::TemplateSyntaxError(m) => {
-                                (&dj.template_syntax_error_cls, m.clone())
-                            }
-                            TemplateError::TemplateDoesNotExist { msg, .. } => {
-                                (&dj.template_does_not_exist_cls, msg.clone())
-                            }
-                            _ => unreachable!(),
-                        };
-                        PyErr::from_value(
-                            cls.bind(py)
-                                .call1((msg,))
-                                .expect("failed to instantiate Django exception")
-                                .into_any(),
-                        )
-                    }
-                    Err(_) => match other {
+            TemplateError::Internal(msg) => pyo3::exceptions::PyRuntimeError::new_err(msg),
+            other => Python::attach(|py| match crate::python_cache::django(py) {
+                Ok(dj) => {
+                    let (cls, msg) = match &other {
                         TemplateError::VariableDoesNotExist { .. } => {
-                            VariableDoesNotExist::new_err(other.to_string())
+                            (&dj.variable_does_not_exist_cls, other.to_string())
                         }
-                        TemplateError::TemplateSyntaxError(msg) => {
-                            TemplateSyntaxError::new_err(msg)
+                        TemplateError::TemplateSyntaxError(m) => {
+                            (&dj.template_syntax_error_cls, m.clone())
                         }
                         TemplateError::TemplateDoesNotExist { msg, .. } => {
-                            TemplateDoesNotExist::new_err(msg)
+                            (&dj.template_does_not_exist_cls, msg.clone())
                         }
                         _ => unreachable!(),
-                    },
+                    };
+                    PyErr::from_value(
+                        cls.bind(py)
+                            .call1((msg,))
+                            .expect("failed to instantiate Django exception")
+                            .into_any(),
+                    )
                 }
+                Err(_) => match other {
+                    TemplateError::VariableDoesNotExist { .. } => {
+                        VariableDoesNotExist::new_err(other.to_string())
+                    }
+                    TemplateError::TemplateSyntaxError(msg) => TemplateSyntaxError::new_err(msg),
+                    TemplateError::TemplateDoesNotExist { msg, .. } => {
+                        TemplateDoesNotExist::new_err(msg)
+                    }
+                    _ => unreachable!(),
+                },
             }),
         }
     }
@@ -167,7 +158,9 @@ impl From<PyErr> for TemplateError {
                 .unwrap_or(false);
 
             if is_template_syntax_error {
-                let msg = err.value(py).str()
+                let msg = err
+                    .value(py)
+                    .str()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| format!("{}", err));
                 return TemplateError::TemplateSyntaxError(msg);
@@ -180,9 +173,18 @@ impl From<PyErr> for TemplateError {
 }
 
 pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("TemplateSyntaxError", m.py().get_type::<TemplateSyntaxError>())?;
-    m.add("VariableDoesNotExist", m.py().get_type::<VariableDoesNotExist>())?;
-    m.add("TemplateDoesNotExist", m.py().get_type::<TemplateDoesNotExist>())?;
+    m.add(
+        "TemplateSyntaxError",
+        m.py().get_type::<TemplateSyntaxError>(),
+    )?;
+    m.add(
+        "VariableDoesNotExist",
+        m.py().get_type::<VariableDoesNotExist>(),
+    )?;
+    m.add(
+        "TemplateDoesNotExist",
+        m.py().get_type::<TemplateDoesNotExist>(),
+    )?;
     Ok(())
 }
 
@@ -218,10 +220,7 @@ mod tests {
 
     #[test]
     fn test_format_msg_repr_specifier() {
-        assert_eq!(
-            format_msg("value is %r", &["42".into()]),
-            "value is 42"
-        );
+        assert_eq!(format_msg("value is %r", &["42".into()]), "value is 42");
     }
 
     #[test]

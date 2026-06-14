@@ -9,7 +9,7 @@ an extra per-zone breakdown is printed for the FULL TEMPLATE.
 
 Run:
 
-    uv sync --group bench
+    uv sync --group dev
     uv run benches/bench.py
 
 Env knobs: BENCH_ITEMS, BENCH_ITERS, BENCH_SECTIONS.
@@ -130,11 +130,7 @@ from django.template.backends.django import DjangoTemplates  # noqa: E402
 from django_template_oxide.backend import OxideTemplates  # noqa: E402
 
 
-# Optional comparison target; rusty column is left blank if missing.
-try:
-    from django_rusty_templates import RustyTemplates as _RustyTemplates
-except ImportError:
-    _RustyTemplates = None
+from django_rusty_templates import RustyTemplates as _RustyTemplates  # noqa: E402
 
 
 # Optional native profiler, compiled in via `cargo build --features=prof`.
@@ -588,14 +584,13 @@ def _build_backends():
         "oxide": OxideTemplates({"NAME": "oxide", **opts}),
         "stock": DjangoTemplates({"NAME": "stock", **opts}),
     }
-    if _RustyTemplates is not None:
-        # rusty doesn't accept the `loaders` OPTIONS key; strip it.
-        rusty_opts = _backend_options()
-        rusty_opts["OPTIONS"].pop("loaders", None)
-        try:
-            backends["rusty"] = _RustyTemplates({"NAME": "rusty", **rusty_opts})
-        except Exception as e:  # pragma: no cover - rusty quirk
-            print(f"  (rusty backend init failed: {e!r}; skipping rusty column)")
+    # rusty doesn't accept the `loaders` OPTIONS key; strip it.
+    rusty_opts = _backend_options()
+    rusty_opts["OPTIONS"].pop("loaders", None)
+    try:
+        backends["rusty"] = _RustyTemplates({"NAME": "rusty", **rusty_opts})
+    except Exception as e:  # pragma: no cover - rusty quirk
+        print(f"  (rusty backend init failed: {e!r}; skipping rusty column)")
     return backends
 
 
@@ -779,11 +774,6 @@ def run(item_count=50, iterations=200, sections=("render", "compile", "scaling")
         section_scaling(backends, iterations)
     apps = _build_applications(item_count)
     section_prof(backends, {"applications": apps}, iterations)
-
-    has_rusty = "rusty" in backends
-    if not has_rusty:
-        print("\n(install django-rusty-templates for the head-to-head column:")
-        print("    uv sync --group bench)")
 
 
 if __name__ == "__main__":

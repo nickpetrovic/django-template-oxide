@@ -51,9 +51,9 @@ pub fn render_nodelist(
         if std::ptr::eq(actual_type, text_node_type_ptr) {
             // TextNode.render_annotated just returns self.s.
             let s = node.getattr(s_attr)?;
-            let s_pystr = s.cast::<PyString>().map_err(|_| {
-                PyRuntimeError::new_err("TextNode.s was not a str")
-            })?;
+            let s_pystr = s
+                .cast::<PyString>()
+                .map_err(|_| PyRuntimeError::new_err("TextNode.s was not a str"))?;
             out.push_str(s_pystr.to_str()?);
         } else {
             // call_method1 with 1-tuple -> PyObject_CallMethodOneArg
@@ -61,9 +61,7 @@ pub fn render_nodelist(
             let result = node.call_method1(render_annotated, (context,))?;
 
             let result_pystr = result.cast::<PyString>().map_err(|_| {
-                PyRuntimeError::new_err(
-                    "Node.render_annotated returned a non-string value",
-                )
+                PyRuntimeError::new_err("Node.render_annotated returned a non-string value")
             })?;
             out.push_str(result_pystr.to_str()?);
         }

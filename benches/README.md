@@ -12,12 +12,13 @@ Three things live here:
 ## Running it
 
 ```sh
-uv sync --group dev --group bench
+uv sync --group dev
 uv run --no-sync python benches/bench.py
 ```
 
-The first run will build `django-rusty-templates` from its upstream
-repo (not on PyPI). Subsequent runs reuse the cached wheel.
+`django-rusty-templates` ships in the `dev` group, so the first
+`uv sync` builds it from its upstream repo (not on PyPI). Subsequent
+runs reuse the cached wheel.
 
 ## What's measured
 
