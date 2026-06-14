@@ -443,11 +443,16 @@ impl BaseContext {
         self.dicts.push(to_internal(values));
     }
 
-    /// Panics if only the builtins layer remains (matches Django's
-    /// `ContextPopException`).
+    /// Returns an empty dict if only the builtins layer remains. The
+    /// balanced-push/pop invariant is debug-asserted (Python-facing pops
+    /// are bounds-checked in `PyContext::pop`).
     pub fn pop(&mut self) -> ContextDict {
+        debug_assert!(
+            self.dicts.len() > 1,
+            "pop() called on BaseContext with only the builtins layer remaining"
+        );
         if self.dicts.len() <= 1 {
-            panic!("pop() called on BaseContext with only the builtins layer remaining");
+            return ContextDict::new();
         }
         to_external(self.dicts.pop().expect("dicts is non-empty"))
     }
@@ -972,11 +977,16 @@ impl RenderContext {
         self.dicts.push(layer);
     }
 
-    /// Returns string-keyed entries; object-keyed are dropped. Panics
-    /// if the stack would be empty.
+    /// Returns string-keyed entries (object-keyed are dropped), or an
+    /// empty dict if only the base layer remains. The balanced-push/pop
+    /// invariant is debug-asserted.
     pub fn pop(&mut self) -> ContextDict {
+        debug_assert!(
+            self.dicts.len() > 1,
+            "pop() called on RenderContext with only one layer remaining"
+        );
         if self.dicts.len() <= 1 {
-            panic!("pop() called on RenderContext with only one layer remaining");
+            return ContextDict::new();
         }
         let layer = self.dicts.pop().expect("dicts is non-empty");
         let mut out = ContextDict::with_capacity(layer.len());
