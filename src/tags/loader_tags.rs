@@ -1184,15 +1184,15 @@ impl Node for IncludeNode {
 pub fn register_loader_tags(parser: &mut Parser) {
     parser.tags.insert(
         "block".to_owned(),
-        TagCompileFunc::Rust(Box::new(compile_block)),
+        TagCompileFunc::Rust(std::rc::Rc::new(compile_block)),
     );
     parser.tags.insert(
         "extends".to_owned(),
-        TagCompileFunc::Rust(Box::new(compile_extends)),
+        TagCompileFunc::Rust(std::rc::Rc::new(compile_extends)),
     );
     parser.tags.insert(
         "include".to_owned(),
-        TagCompileFunc::Rust(Box::new(compile_include)),
+        TagCompileFunc::Rust(std::rc::Rc::new(compile_include)),
     );
 }
 

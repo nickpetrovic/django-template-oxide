@@ -1300,45 +1300,23 @@ fn maybe_call_template_callable<'py>(
 }
 
 /// True for exact str/int/float/bool/dict/list/tuple. These are never
-/// template-callable. Compares `Py_TYPE` pointer against a thread-local
-/// cache of the seven builtin type objects (single load + compare).
-/// Subclasses fall through to the slow callable check, which is correct.
+/// template-callable. Subclasses fall through to the slow callable
+/// check, which is correct.
 #[inline]
 fn is_primitive_or_collection(obj: &Bound<'_, pyo3::PyAny>) -> bool {
     use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
-    if obj.is_none() {
-        return true;
-    }
-
-    // SAFETY: ffi::Py_TYPE returns a borrowed pointer. We only compare,
-    // never deref.
-    let actual = unsafe { pyo3::ffi::Py_TYPE(obj.as_ptr()) };
-    let py = obj.py();
-
-    PRIMITIVE_TYPE_PTRS.with(|cache| {
-        let ptrs = cache.get_or_init(|| {
-            use pyo3::type_object::PyTypeInfo;
-            [
-                PyString::type_object_raw(py),
-                PyDict::type_object_raw(py),
-                PyList::type_object_raw(py),
-                PyTuple::type_object_raw(py),
-                PyInt::type_object_raw(py),
-                PyFloat::type_object_raw(py),
-                PyBool::type_object_raw(py),
-            ]
-        });
-        ptrs.iter().any(|&p| std::ptr::eq(p, actual))
-    })
+    obj.is_none()
+        || obj.is_exact_instance_of::<PyString>()
+        || obj.is_exact_instance_of::<PyDict>()
+        || obj.is_exact_instance_of::<PyList>()
+        || obj.is_exact_instance_of::<PyTuple>()
+        || obj.is_exact_instance_of::<PyInt>()
+        || obj.is_exact_instance_of::<PyFloat>()
+        || obj.is_exact_instance_of::<PyBool>()
 }
 
 thread_local! {
-    /// `Py_TYPE` pointers for the seven non-template-callable builtins.
-    /// Thread-local because `PyType::type_object` needs the GIL.
-    static PRIMITIVE_TYPE_PTRS: std::cell::OnceCell<[*mut pyo3::ffi::PyTypeObject; 7]> =
-        std::cell::OnceCell::new();
-
     /// Per-type cache of `__getitem__` and callable bits. Holds a
     /// strong `Py<PyType>` so addresses can't be reused for different
     /// types after GC (the cache is keyed by type-pointer address).

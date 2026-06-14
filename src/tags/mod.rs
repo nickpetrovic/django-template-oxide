@@ -1941,7 +1941,7 @@ pub fn register_default_tags(parser: &mut Parser) {
     for (name, func) in tags {
         parser
             .tags
-            .insert(name.to_owned(), TagCompileFunc::Rust(Box::new(func)));
+            .insert(name.to_owned(), TagCompileFunc::Rust(std::rc::Rc::new(func)));
     }
 
     i18n_tags::register_i18n_tags(parser);

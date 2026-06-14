@@ -59,16 +59,16 @@ pub fn html_escape_into(input: &str, output: &mut String) {
             b'\'' => "&#x27;",
             _ => continue,
         };
-        // SAFETY: split is on ASCII; UTF-8 boundaries preserved.
+        // Split points are ASCII bytes, so `last`/`i` are char boundaries.
         if last < i {
-            output.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[last..i]) });
+            output.push_str(&input[last..i]);
         }
         output.push_str(replacement);
         last = i + 1;
     }
 
     if last < bytes.len() {
-        output.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[last..]) });
+        output.push_str(&input[last..]);
     }
 }
 

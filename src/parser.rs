@@ -2,6 +2,7 @@
 //! `Token`s and builds a `Node` tree.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use pyo3::prelude::*;
 
@@ -11,7 +12,7 @@ use crate::nodes::{Node, NodeList, Origin, TextNode, VariableNode};
 use crate::variable::{FilterExpression, ParsedFilter};
 
 pub type RustTagCompileFn =
-    Box<dyn Fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>>;
+    Rc<dyn Fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>>;
 
 /// Handler for `{% name %}`. Rust closure (built-ins) or Python
 /// callable (loaded via `{% load %}`).
@@ -192,8 +193,19 @@ impl Parser {
 
                     self.command_stack.push((command.clone(), token.clone()));
 
-                    let compile_func = match self.tags.get(&command) {
-                        Some(f) => f,
+                    // Clone an owned handle (a cheap `Rc`/`Py` refcount
+                    // bump) out of `self.tags` so the call can take
+                    // `&mut self` without holding the map borrow.
+                    let compiled_result = match self.tags.get(&command) {
+                        Some(TagCompileFunc::Rust(rust_fn)) => {
+                            let rust_fn = Rc::clone(rust_fn);
+                            rust_fn(self, &token).map_err(|e| self.error(&token, e))?
+                        }
+                        Some(TagCompileFunc::Python(py_fn)) => {
+                            let py_fn = Python::attach(|py| py_fn.clone_ref(py));
+                            dispatch_python_compile_fn(self, &py_fn, &token)
+                                .map_err(|e| self.error(&token, e))?
+                        }
                         None => {
                             return Err(self.invalid_block_tag(
                                 &token,
@@ -204,26 +216,6 @@ impl Parser {
                                     Some(parse_until)
                                 },
                             ));
-                        }
-                    };
-
-                    // Borrow-checker dance: the compile fn needs `&mut self`
-                    // while it lives in `self.tags`. Rust variant uses a raw
-                    // pointer (we don't mutate self.tags during the call);
-                    // Python variant clones the Py<PyAny> Arc.
-                    let compiled_result = match compile_func {
-                        TagCompileFunc::Rust(rust_fn) => {
-                            let rust_fn_ptr: *const RustTagCompileFn = rust_fn;
-                            // SAFETY: pointer to a live HashMap value; we
-                            // don't insert/remove from `self.tags` during
-                            // the call so no reallocation invalidates it.
-                            let rust_fn_ref: &RustTagCompileFn = unsafe { &*rust_fn_ptr };
-                            rust_fn_ref(self, &token).map_err(|e| self.error(&token, e))?
-                        }
-                        TagCompileFunc::Python(py_fn) => {
-                            let py_fn_clone = Python::attach(|py| py_fn.clone_ref(py));
-                            dispatch_python_compile_fn(self, &py_fn_clone, &token)
-                                .map_err(|e| self.error(&token, e))?
                         }
                     };
 
@@ -665,7 +657,7 @@ mod tests {
         // Register a simple tag that produces a TextNode.
         parser.tags.insert(
             "hello".to_owned(),
-            TagCompileFunc::Rust(Box::new(|_parser: &mut Parser, _token: &Token| {
+            TagCompileFunc::Rust(Rc::new(|_parser: &mut Parser, _token: &Token| {
                 Ok(Box::new(TextNode::new("world")) as Box<dyn Node>)
             })),
         );
@@ -683,7 +675,7 @@ mod tests {
 
         parser.tags.insert(
             "if".to_owned(),
-            TagCompileFunc::Rust(Box::new(|parser: &mut Parser, _token: &Token| {
+            TagCompileFunc::Rust(Rc::new(|parser: &mut Parser, _token: &Token| {
                 let children = parser.parse(&["endif"])?;
                 parser.delete_first_token(); // consume {% endif %}
                 let msg = format!("children:{}", children.len());

@@ -206,9 +206,7 @@ fn py_tokenize_via_django(
     let mut out: Vec<crate::lexer::Token> = if let Ok(list) = py_tokens.cast::<PyList>() {
         let n = list.len();
         let mut v = Vec::with_capacity(n);
-        for i in 0..n {
-            // SAFETY: i is strictly in [0, n) and we hold the GIL.
-            let tok = unsafe { list.get_item_unchecked(i) };
+        for tok in list.iter() {
             v.push(extract_token(
                 py,
                 &tok,

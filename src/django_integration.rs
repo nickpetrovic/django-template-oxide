@@ -3,13 +3,12 @@
 //! writes into one pre-sized buffer. Caller wraps in `mark_safe`.
 
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyString};
+use pyo3::types::{PyList, PyString, PyType};
 
-/// `nodelist` must be a list (Django's `NodeList`). `text_node_cls` is
-/// pointer-compared against `Py_TYPE(node)`. Exceptions from
+/// `nodelist` must be a list (Django's `NodeList`). Each node is
+/// exact-type compared against `text_node_cls`. Exceptions from
 /// `node.render_annotated` propagate.
 #[pyfunction]
 #[pyo3(signature = (nodelist, context, text_node_cls, _variable_node_cls=None))]
@@ -32,23 +31,17 @@ pub fn render_nodelist(
     // 32B/node is a conservative average; buffer doubles on overflow.
     let mut out = String::with_capacity(len.saturating_mul(32));
 
-    // PyTypeObject's first field is ob_base of PyObject, so the
-    // class's PyObject pointer doubles as its type-object pointer.
-    let text_node_type_ptr: *mut ffi::PyTypeObject =
-        text_node_cls.as_ptr() as *mut ffi::PyTypeObject;
+    let text_node_type = text_node_cls.cast::<PyType>().map_err(|_| {
+        PyRuntimeError::new_err("render_nodelist: text_node_cls must be a type")
+    })?;
 
     let s_attr = intern!(py, "s");
     let render_annotated = intern!(py, "render_annotated");
 
-    for i in 0..len {
-        // SAFETY: i in [0, len), GIL held.
-        let node = unsafe { list.get_item_unchecked(i) };
-
-        // Exact-type compare so subclasses correctly fall through to
-        // the slow path (they may override render_annotated).
-        let actual_type: *mut ffi::PyTypeObject = unsafe { ffi::Py_TYPE(node.as_ptr()) };
-
-        if std::ptr::eq(actual_type, text_node_type_ptr) {
+    for node in list.iter() {
+        // Exact-type compare so subclasses (which may override
+        // render_annotated) fall through to the slow path.
+        if node.is_exact_instance(text_node_type) {
             // TextNode.render_annotated just returns self.s.
             let s = node.getattr(s_attr)?;
             let s_pystr = s

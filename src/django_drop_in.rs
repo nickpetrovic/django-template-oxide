@@ -439,8 +439,7 @@ impl PyParser {
         };
         let until_refs: Vec<&str> = until_strings.iter().map(|s| s.as_str()).collect();
 
-        // SAFETY: parser_ptr is valid for this call's duration.
-        let parser = unsafe { &mut *self.parser_ptr };
+        let parser = self.parser();
         let nodelist = parser
             .parse(&until_refs)
             .map_err(<PyErr as From<TemplateError>>::from)?;
@@ -449,7 +448,7 @@ impl PyParser {
     }
 
     fn next_token(&self, py: Python<'_>) -> PyResult<PyToken> {
-        let parser = unsafe { &mut *self.parser_ptr };
+        let parser = self.parser();
         if !parser.has_tokens() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "parser.next_token: no more tokens in the stream",
@@ -460,7 +459,7 @@ impl PyParser {
     }
 
     fn prepend_token(&self, token: &PyToken) {
-        let parser = unsafe { &mut *self.parser_ptr };
+        let parser = self.parser();
         let pos = token.position.map(|(start, _end)| start);
         let source_len = token
             .position
@@ -472,12 +471,12 @@ impl PyParser {
     }
 
     fn delete_first_token(&self) {
-        let parser = unsafe { &mut *self.parser_ptr };
+        let parser = self.parser();
         parser.delete_first_token();
     }
 
     fn skip_past(&self, endtag: &str) -> PyResult<()> {
-        let parser = unsafe { &mut *self.parser_ptr };
+        let parser = self.parser();
         parser
             .skip_past(endtag)
             .map_err(<PyErr as From<TemplateError>>::from)
@@ -485,7 +484,7 @@ impl PyParser {
 
     /// Returns a `PyFilterExpression` (`.resolve(context)`-able).
     fn compile_filter(&self, py: Python<'_>, token_string: &str) -> PyResult<Py<PyAny>> {
-        let parser = unsafe { &*self.parser_ptr };
+        let parser = self.parser();
         let fe = parser
             .compile_filter(token_string)
             .map_err(<PyErr as From<TemplateError>>::from)?;
@@ -512,7 +511,7 @@ impl PyParser {
     /// library still understands `{% if %}` / `{% for %}` etc.
     #[getter]
     fn tags(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
-        let parser = unsafe { &*self.parser_ptr };
+        let parser = self.parser();
         let dict = pyo3::types::PyDict::new(py);
 
         for (name, py_fn) in parser.python_tag_shadow.iter() {
@@ -532,7 +531,7 @@ impl PyParser {
     /// `NativeFilterWrapper`). Mirrors `Parser.filters`.
     #[getter]
     fn filters(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
-        let parser = unsafe { &*self.parser_ptr };
+        let parser = self.parser();
         let dict = pyo3::types::PyDict::new(py);
         for (name, py_fn) in parser.filters.iter() {
             dict.set_item(name, py_fn.clone_ref(py))?;
@@ -544,7 +543,7 @@ impl PyParser {
     /// compile-fn invocations within a parse pass.
     #[getter]
     fn extra_data(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
-        let parser = unsafe { &mut *self.parser_ptr };
+        let parser = self.parser();
         if parser.python_extra_data.is_none() {
             parser.python_extra_data = Some(pyo3::types::PyDict::new(py).unbind());
         }
@@ -553,7 +552,7 @@ impl PyParser {
 
     /// Mirrors `Parser.find_filter` (base.py:678).
     fn find_filter(&self, py: Python<'_>, filter_name: &str) -> PyResult<Py<PyAny>> {
-        let parser = unsafe { &*self.parser_ptr };
+        let parser = self.parser();
         match parser.filters.get(filter_name) {
             Some(f) => Ok(f.clone_ref(py)),
             None => {
@@ -569,7 +568,7 @@ impl PyParser {
     /// `Parser.origin`; may be `None` (e.g. `Template(source)`).
     #[getter]
     fn origin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let parser = unsafe { &*self.parser_ptr };
+        let parser = self.parser();
         match &parser.origin {
             None => Ok(py.None()),
             Some(o) => {
@@ -587,7 +586,7 @@ impl PyParser {
     }
 
     fn __repr__(&self) -> String {
-        let parser = unsafe { &*self.parser_ptr };
+        let parser = self.parser();
         format!(
             "<Parser tags={} filters={} tokens_remaining={}>",
             parser.tags.len(),
@@ -598,6 +597,14 @@ impl PyParser {
 }
 
 impl PyParser {
+    /// The bridge's single raw deref. Sound while the lent `&mut Parser`
+    /// is live: the PyParser is dropped before the compile call returns,
+    /// and the GIL serializes the (stack-nested) re-entrant access.
+    #[allow(clippy::mut_from_ref)]
+    fn parser(&self) -> &mut crate::parser::Parser {
+        unsafe { &mut *self.parser_ptr }
+    }
+
     /// # Safety
     ///
     /// `parser_ptr` must point to a live, exclusively-borrowed Parser.
