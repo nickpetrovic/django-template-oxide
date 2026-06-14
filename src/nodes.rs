@@ -65,11 +65,10 @@ fn attach_template_debug(
             Err(_) => return TemplateError::PythonError(py_err),
         };
 
-        if let Ok(get_exc_info) = template_obj.getattr("get_exception_info") {
-            if let Ok(debug_info) = get_exc_info.call1((&py_err, py_token_obj)) {
+        if let Ok(get_exc_info) = template_obj.getattr("get_exception_info")
+            && let Ok(debug_info) = get_exc_info.call1((&py_err, py_token_obj)) {
                 let _ = exc_obj.setattr("template_debug", debug_info);
             }
-        }
     }
 
     TemplateError::PythonError(py_err)
@@ -657,11 +656,10 @@ pub fn resolve_expression_ignore_failures(
 ) -> Result<Value, TemplateError> {
     if fe.filters.is_empty() {
         let mut val = resolve_base_variable(py, fe, context)?;
-        if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
-            if variable.translate {
+        if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var
+            && variable.translate {
                 val = apply_translation_rust(py, &val, variable.message_context.as_deref())?;
             }
-        }
         if fe.is_var {
             match &val {
                 Value::String(s) if s.is_empty() => {
@@ -753,11 +751,10 @@ fn resolve_variable_rust(
 ) -> Result<Value, TemplateError> {
     let mut value = resolve_base_variable(py, fe, context)?;
 
-    if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
-        if variable.translate {
+    if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var
+        && variable.translate {
             value = apply_translation_rust(py, &value, variable.message_context.as_deref())?;
         }
-    }
 
     Ok(value)
 }
@@ -844,14 +841,13 @@ fn resolve_base_variable(
             // value from the current tuple (single FFI call, no
             // getattr chain). Outside batched loops the block is a
             // single null-check.
-            if let Some(slot) = variable.batch_slot() {
-                if let Some(cache) = context.loop_batch_cache.as_ref() {
+            if let Some(slot) = variable.batch_slot()
+                && let Some(cache) = context.loop_batch_cache.as_ref() {
                     let tuple = cache.current_tuple.bind(py);
                     if let Ok(val) = tuple.get_item(slot as usize) {
                         return Ok(value_from_pyany_fast(&val));
                     }
                 }
-            }
 
             // Borrow head; we only clone when walking Rust Dict/List.
             let head = match context.get(&parts[0]) {
@@ -1029,12 +1025,11 @@ fn resolve_pyobject_lookups(
                         current = val;
                         continue;
                     }
-                } else if let Ok(tup) = current.cast::<PyTuple>() {
-                    if let Ok(val) = tup.get_item(idx as usize) {
+                } else if let Ok(tup) = current.cast::<PyTuple>()
+                    && let Ok(val) = tup.get_item(idx as usize) {
                         current = val;
                         continue;
                     }
-                }
             }
 
             // General lookup. Skip `get_item` when the type doesn't
@@ -1457,13 +1452,11 @@ fn call_python_filter(
             all_args.push(a.into_bound(py));
         }
         let args_tuple =
-            pyo3::types::PyTuple::new(py, &all_args).map_err(<PyErr as From<_>>::from)?;
+            pyo3::types::PyTuple::new(py, &all_args)?;
         let kwargs = pyo3::types::PyDict::new(py);
         kwargs
-            .set_item(pyo3::intern!(py, "autoescape"), context.autoescape)
-            .map_err(<PyErr as From<_>>::from)?;
-        func.call(args_tuple, Some(&kwargs))
-            .map_err(<PyErr as From<_>>::from)?
+            .set_item(pyo3::intern!(py, "autoescape"), context.autoescape)?;
+        func.call(args_tuple, Some(&kwargs))?
     } else {
         let mut all_args: Vec<Bound<'_, pyo3::PyAny>> = Vec::with_capacity(1 + py_args.len());
         all_args.push(py_obj.into_bound(py));
@@ -1471,17 +1464,16 @@ fn call_python_filter(
             all_args.push(a.into_bound(py));
         }
         let args_tuple =
-            pyo3::types::PyTuple::new(py, &all_args).map_err(<PyErr as From<_>>::from)?;
-        func.call1(args_tuple).map_err(<PyErr as From<_>>::from)?
+            pyo3::types::PyTuple::new(py, &all_args)?;
+        func.call1(args_tuple)?
     };
 
     // Preserve safety when both input was safe and filter is_safe.
     let value = Value::from(&result);
-    if is_safe && was_safe {
-        if let Value::String(s) = value {
+    if is_safe && was_safe
+        && let Value::String(s) = value {
             return Ok(Value::SafeString(s.into()));
         }
-    }
     Ok(value)
 }
 
@@ -1495,11 +1487,10 @@ fn is_value_safe(value: &Value) -> bool {
             let py_type = bound.get_type();
             let type_ptr = py_type.as_ptr() as usize;
             TYPE_BEHAVIOR_CACHE.with(|cache| {
-                if let Some((_, b)) = cache.borrow().get(&type_ptr) {
-                    if let Some(is_safe) = b.is_safe_data {
+                if let Some((_, b)) = cache.borrow().get(&type_ptr)
+                    && let Some(is_safe) = b.is_safe_data {
                         return is_safe;
                     }
-                }
                 let cls = match safedata_class(py) {
                     Some(c) => c,
                     None => return false,
@@ -1622,37 +1613,32 @@ fn resolve_with_filters_inner(
         resolve_base_variable(py, fe, context)?
     };
 
-    if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
-        if variable.translate {
+    if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var
+        && variable.translate {
             obj = apply_translation_rust(py, &obj, variable.message_context.as_deref())?;
         }
-    }
 
     // Django's FilterExpression.resolve (base.py:792-798): when the
     // base variable is missing and string_if_invalid is non-empty,
     // return string_if_invalid immediately WITHOUT running filters.
-    if !ignore_failures && fe.is_var && !context.string_if_invalid.is_empty() {
-        if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
+    if !ignore_failures && fe.is_var && !context.string_if_invalid.is_empty()
+        && let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
             // Detect a variable miss: the resolved value equals what
             // format_invalid_message would produce.
             let expected = format_invalid_message(&context.string_if_invalid, &variable.var);
-            if let Value::String(ref s) = obj {
-                if *s == expected {
+            if let Value::String(ref s) = obj
+                && *s == expected {
                     return Ok(obj);
                 }
-            }
         }
-    }
 
     // Convert empty-string miss to None so `default` / `default_if_none`
     // see the right input.
-    if ignore_failures && fe.is_var {
-        if let Value::String(ref s) = obj {
-            if s.is_empty() && context.string_if_invalid.is_empty() {
+    if ignore_failures && fe.is_var
+        && let Value::String(ref s) = obj
+            && s.is_empty() && context.string_if_invalid.is_empty() {
                 obj = Value::None;
             }
-        }
-    }
 
     for (idx, parsed_filter) in fe.filters.iter().enumerate() {
         let n_args = parsed_filter.args.len();
@@ -1750,10 +1736,7 @@ fn resolve_with_filters_inner(
 /// routed through Django for `localize` / `template_localtime` /
 /// `conditional_escape` correctness.
 pub fn render_value_in_context(value: &Value, context: &Context) -> String {
-    match render_value_in_context_checked(value, context) {
-        Ok(s) => s,
-        Err(_) => String::new(),
-    }
+    render_value_in_context_checked(value, context).unwrap_or_default()
 }
 
 pub fn render_value_in_context_checked(
@@ -1855,8 +1838,8 @@ fn render_pyobject_into(obj: &Py<pyo3::PyAny>, context: &Context, out: &mut Stri
 
         // Exact PyString only: SafeString (a str subclass) must NOT be
         // html-escaped and falls through to the `__html__` slow path.
-        if bound.is_exact_instance_of::<PyString>() {
-            if let Ok(s) = bound.extract::<String>() {
+        if bound.is_exact_instance_of::<PyString>()
+            && let Ok(s) = bound.extract::<String>() {
                 if context.autoescape {
                     crate::utils::html_escape_into(&s, out);
                 } else {
@@ -1864,7 +1847,6 @@ fn render_pyobject_into(obj: &Py<pyo3::PyAny>, context: &Context, out: &mut Stri
                 }
                 return;
             }
-        }
 
         // Bool first: PyBool is a PyInt subclass.
         if bound.is_exact_instance_of::<PyBool>() {
@@ -1877,12 +1859,11 @@ fn render_pyobject_into(obj: &Py<pyo3::PyAny>, context: &Context, out: &mut Stri
         }
 
         // BigInts fall through to the slow path.
-        if bound.is_exact_instance_of::<PyInt>() {
-            if let Ok(n) = bound.extract::<i64>() {
+        if bound.is_exact_instance_of::<PyInt>()
+            && let Ok(n) = bound.extract::<i64>() {
                 let _ = write!(out, "{n}");
                 return;
             }
-        }
 
         if bound.is_none() {
             out.push_str("None");

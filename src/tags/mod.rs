@@ -20,7 +20,7 @@ use crate::context::{Context, ContextDict, Value};
 use crate::errors::TemplateError;
 use crate::lexer::Token;
 use crate::nodes::{Node, NodeList, Origin};
-use crate::parser::{Parser, TagCompileFunc};
+use crate::parser::{Parser, TagCompileFn, TagCompileFunc};
 use crate::smartif::{IfExpr, IfParser, IfValue, InfixOp, PrefixOp};
 use crate::variable::FilterExpression;
 
@@ -416,9 +416,9 @@ fn parse_if_condition(parser: &Parser, bits: &[String]) -> Result<CompiledIfExpr
     let token_strings = collect_if_vars(&expr);
     let mut vars = HashMap::new();
     for token_str in token_strings {
-        if !vars.contains_key(&token_str) {
+        if let std::collections::hash_map::Entry::Vacant(e) = vars.entry(token_str.clone()) {
             let fe = parser.compile_filter(&token_str)?;
-            vars.insert(token_str, fe);
+            e.insert(fe);
         }
     }
 
@@ -1134,10 +1134,7 @@ fn load_python_library<'py>(
         .map_err(|e| TemplateError::Internal(format!("Cannot get import_library: {e}")))?;
 
     let dotted_path = format!("django.templatetags.{}", name);
-    match import_library.call1((dotted_path.as_str(),)) {
-        Ok(lib) => return Ok(lib),
-        Err(_) => {}
-    }
+    if let Ok(lib) = import_library.call1((dotted_path.as_str(),)) { return Ok(lib) }
 
     match import_library.call1((name,)) {
         Ok(lib) => Ok(lib),
@@ -1911,10 +1908,7 @@ pub fn compile_resetcycle(
 
 /// Register all built-in template tags on the parser.
 pub fn register_default_tags(parser: &mut Parser) {
-    let tags: Vec<(
-        &str,
-        fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>,
-    )> = vec![
+    let tags: Vec<(&str, TagCompileFn)> = vec![
         ("if", compile_if),
         ("for", compile_for),
         ("with", compile_with),
@@ -1949,6 +1943,7 @@ pub fn register_default_tags(parser: &mut Parser) {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::context::{Context, Value};

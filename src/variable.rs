@@ -250,8 +250,7 @@ impl Variable {
                             {
                                 return Err(PyTypeError::new_err("skip"));
                             }
-                            current.getattr(bit_py.clone()).map_err(Into::into)
-                        })(
+                            current.getattr(bit_py.clone())})(
                         );
 
                         match attr_result {
@@ -485,11 +484,10 @@ fn handle_callable_type_error<'py>(
 fn dir_contains(dir_list: &Bound<'_, PyAny>, name: &str) -> bool {
     if let Ok(list) = dir_list.cast::<PyList>() {
         for item in list.iter() {
-            if let Ok(s) = item.extract::<String>() {
-                if s == name {
+            if let Ok(s) = item.extract::<String>()
+                && s == name {
                     return true;
                 }
-            }
         }
     }
     false
@@ -831,7 +829,7 @@ impl FilterExpression {
                 .and_then(|v| v.is_truthy().ok())
                 .unwrap_or(false);
 
-            let is_safe_before = obj.is_instance(&safe_data_cls)?;
+            let is_safe_before = obj.is_instance(safe_data_cls)?;
 
             let new_obj = if needs_autoescape {
                 let autoescape = context.getattr("autoescape")?;
@@ -878,6 +876,7 @@ impl std::fmt::Display for FilterExpression {
 // Tests
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

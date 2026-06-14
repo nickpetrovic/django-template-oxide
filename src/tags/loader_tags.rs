@@ -177,11 +177,10 @@ fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>>
                 }
             }
             for child_name in node.child_nodelists() {
-                if let Some(child_nl) = node.get_child_nodelist(child_name) {
-                    if let Some(found) = extract_partial_arc(child_nl, name) {
+                if let Some(child_nl) = node.get_child_nodelist(child_name)
+                    && let Some(found) = extract_partial_arc(child_nl, name) {
                         return Some(found);
                     }
-                }
             }
         }
     }
@@ -202,6 +201,7 @@ fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>>
 /// Returns `(source, engine, origin)`. `origin` is the Python `Origin`
 /// of the loaded Django Template, used to seed `extends_context` history
 /// so same-name-multi-loader chains skip correctly.
+#[allow(clippy::type_complexity)]
 fn load_template_source_and_engine<'py>(
     py: Python<'py>,
     template_name: &str,
@@ -632,10 +632,7 @@ impl ExtendsNode {
     fn render_inner(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         // Try resolving template name; if it resolves to a Template object,
         // compile its source directly instead of loading by name.
-        let parent_nodelist = match self.resolve_parent_nodelist(py, context) {
-            Ok(nl) => nl,
-            Err(e) => return Err(e),
-        };
+        let parent_nodelist = self.resolve_parent_nodelist(py, context)?;
 
         let block_context = get_or_create_block_context(context);
         block_context.add_blocks(&self.blocks);
@@ -696,7 +693,7 @@ impl ExtendsNode {
                 let engine_clone = context.engine.as_ref().map(|e| e.clone_ref(py));
                 if let Some(ref engine_py) = engine_clone {
                     let origin_ref = current_origin.as_ref().map(|o| o.bind(py));
-                    load_template_with_history(py, &name, engine_py, context, origin_ref.as_deref())
+                    load_template_with_history(py, &name, engine_py, context, origin_ref)
                 } else {
                     load_template_nodelist(py, &name, context, None).map(|(nl, _origin)| nl)
                 }
@@ -1440,13 +1437,11 @@ fn collect_block_nodes(nodelist: &NodeList) -> HashMap<String, BlockNodeRef> {
 /// Check if a nodelist contains `{{ block.super }}` references.
 fn nodelist_uses_block_super(nodelist: &NodeList) -> bool {
     for entry in nodelist.iter_entries() {
-        if let crate::nodes::NodeEntry::Variable(var_node) = entry {
-            if let Some(token) = var_node.token() {
-                if token.contents.contains("block.super") {
+        if let crate::nodes::NodeEntry::Variable(var_node) = entry
+            && let Some(token) = var_node.token()
+                && token.contents.contains("block.super") {
                     return true;
                 }
-            }
-        }
     }
     false
 }

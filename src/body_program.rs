@@ -93,11 +93,10 @@ impl BodyProgram {
                 let mut result =
                     col.filter_id
                         .dispatch(&input, args_slice, ae, Some(col.native_fn));
-                if col.is_safe_filter {
-                    if let Value::String(s) = result {
+                if col.is_safe_filter
+                    && let Value::String(s) = result {
                         result = Value::SafeString(Arc::from(s));
                     }
-                }
                 col_values.push(result);
             }
             out.push(col_values);
@@ -414,11 +413,10 @@ fn compile_if(builder: &mut ProgramBuilder, if_node: &crate::tags::IfNode, loopv
         Some(c) => c,
         None => return false,
     };
-    if let Some(eb) = else_branch {
-        if eb.condition().is_some() {
+    if let Some(eb) = else_branch
+        && eb.condition().is_some() {
             return false;
         }
-    }
 
     let slot = match cond.single_var_batch_slot(loopvar) {
         Some(s) => s,
@@ -432,13 +430,13 @@ fn compile_if(builder: &mut ProgramBuilder, if_node: &crate::tags::IfNode, loopv
         return false;
     }
 
-    if else_branch.is_some() {
+    if let Some(else_branch) = else_branch {
         let skip_pc = builder.emit(Op::Jmp(0));
         let else_start = builder.ops.len() as u32;
         if let Op::JmpIfSlotFalsy { else_pc, .. } = &mut builder.ops[jmp_pc as usize] {
             *else_pc = else_start;
         }
-        if !compile_nodelist(builder, else_branch.unwrap().nodelist(), loopvar) {
+        if !compile_nodelist(builder, else_branch.nodelist(), loopvar) {
             return false;
         }
         let end_pc = builder.ops.len() as u32;

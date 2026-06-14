@@ -880,13 +880,12 @@ impl PyTemplate {
 
         // Propagate context mutations back to the original PyContext
         // so tags like {% firstof ... as var %} are visible to callers.
-        if let Some(obj) = context {
-            if let Ok(pyctx) = obj.cast::<PyContext>() {
+        if let Some(obj) = context
+            && let Ok(pyctx) = obj.cast::<PyContext>() {
                 let mut borrowed = pyctx.borrow_mut();
                 // Copy the entire base context back (including new keys)
                 borrowed.inner.base = rust_context.base;
             }
-        }
 
         result.map_err(|e| -> PyErr { e.into() })
     }
@@ -903,11 +902,10 @@ impl PyTemplate {
     fn nodelist(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyList>> {
         let list = pyo3::types::PyList::empty(py);
         for entry in self.inner.nodelist.iter_entries() {
-            if let crate::nodes::NodeEntry::Boxed(boxed) = entry {
-                if let Some(py_node) = boxed.as_py_node() {
+            if let crate::nodes::NodeEntry::Boxed(boxed) = entry
+                && let Some(py_node) = boxed.as_py_node() {
                     list.append(py_node.clone_ref(py))?;
                 }
-            }
         }
         Ok(list.unbind())
     }
@@ -990,6 +988,7 @@ impl PyEngine {
         }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn from_string(&self, template_code: &str, py: Python<'_>) -> PyResult<PyTemplate> {
         let sii = if self.string_if_invalid.is_empty() {
             None
@@ -1144,11 +1143,10 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Value {
 
     let mut val = Value::from(obj);
 
-    if is_safe {
-        if let Value::String(s) = val {
+    if is_safe
+        && let Value::String(s) = val {
             val = Value::SafeString(s.into());
         }
-    }
 
     val
 }
@@ -1162,13 +1160,13 @@ fn value_to_py(py: Python<'_>, val: &Value) -> Py<PyAny> {
                 .import("django.utils.safestring")
                 .and_then(|m| m.getattr("mark_safe"))
             {
-                let s_ref: &str = &s;
+                let s_ref: &str = s;
                 if let Ok(result) = mark_safe.call1((s_ref,)) {
                     return result.unbind();
                 }
             }
             // Fallback: return as a plain string.
-            let s_ref: &str = &s;
+            let s_ref: &str = s;
             s_ref.into_pyobject(py).unwrap().into_any().unbind()
         }
         _ => val.to_pyobject(py),
@@ -1186,15 +1184,13 @@ pub fn register_default_filters(py: Python<'_>, parser: &mut crate::parser::Pars
     let django_filters = py.import("django.template.defaultfilters").ok();
 
     for (name, native_filter) in native_filters {
-        if PYTHON_DELEGATED_FILTERS.contains(&name.as_str()) {
-            if let Some(ref df_module) = django_filters {
-                if let Ok(py_filter) = df_module.getattr(name.as_str()) {
+        if PYTHON_DELEGATED_FILTERS.contains(&name.as_str())
+            && let Some(ref df_module) = django_filters
+                && let Ok(py_filter) = df_module.getattr(name.as_str()) {
                     parser.filters.insert(name.clone(), py_filter.unbind());
                     continue;
                 }
-            }
             // Django not available: fall through to the Rust stub.
-        }
 
         let wrapper = NativeFilterWrapper {
             name: name.clone(),

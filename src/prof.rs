@@ -13,7 +13,7 @@ mod imp {
 
     thread_local! {
         pub(super) static STATS: RefCell<BTreeMap<&'static str, (u64, Duration)>> =
-            RefCell::new(BTreeMap::new());
+            const { RefCell::new(BTreeMap::new()) };
     }
 
     pub struct Guard {

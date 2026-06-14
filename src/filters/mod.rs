@@ -112,14 +112,14 @@ fn preserve_safety(input: &Value, output: String) -> Value {
 /// Get the first filter argument as a string, or return a default.
 fn arg_as_string(args: &[Value], default: &str) -> String {
     args.first()
-        .map(|a| value_to_string(a))
+        .map(value_to_string)
         .unwrap_or_else(|| default.to_owned())
 }
 
 /// Get the first filter argument as an i64, or return a default.
 fn arg_as_i64(args: &[Value], default: i64) -> i64 {
     args.first()
-        .and_then(|a| coerce_to_i64(a))
+        .and_then(coerce_to_i64)
         .unwrap_or(default)
 }
 
@@ -170,10 +170,8 @@ fn value_to_list(v: &Value) -> Option<Vec<Value>> {
             let bound = obj.bind(py);
             let iter = bound.try_iter().ok()?;
             let mut out = Vec::new();
-            for item in iter {
-                if let Ok(v) = item {
-                    out.push(Value::from(&v));
-                }
+            for v in iter.flatten() {
+                out.push(Value::from(&v));
             }
             Some(out)
         }),
@@ -472,7 +470,7 @@ fn filter_title(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
 /// "Testing" gives "Te...").
 fn filter_truncatechars(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     let s = value_to_string(value);
-    let max_len = match args.first().and_then(|a| coerce_to_i64(a)) {
+    let max_len = match args.first().and_then(coerce_to_i64) {
         Some(n) => n,
         None => return preserve_safety(value, s),
     };
@@ -629,7 +627,7 @@ fn filter_linenumbers(value: &Value, _args: &[Value], autoescape: bool) -> Value
 fn filter_safe(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
     match value {
         Value::String(s) => Value::SafeString(s.clone().into()),
-        Value::SafeString(s) => Value::SafeString(s.clone().into()),
+        Value::SafeString(s) => Value::SafeString(s.clone()),
         _ => Value::SafeString(value_to_string(value).into()),
     }
 }
@@ -725,8 +723,8 @@ fn filter_first(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
 /// when autoescape is on and they're not safe.
 fn filter_join(value: &Value, args: &[Value], autoescape: bool) -> Value {
     let sep_value = args.first();
-    let sep_raw = sep_value.map(|a| value_to_string(a)).unwrap_or_default();
-    let sep_is_safe = sep_value.map_or(true, is_safe_value);
+    let sep_raw = sep_value.map(value_to_string).unwrap_or_default();
+    let sep_is_safe = sep_value.is_none_or(is_safe_value);
     let sep = if autoescape && !sep_is_safe {
         html_escape(&sep_raw)
     } else {
@@ -739,10 +737,8 @@ fn filter_join(value: &Value, args: &[Value], autoescape: bool) -> Value {
             let bound = obj.bind(py);
             if let Ok(iter) = bound.try_iter() {
                 let mut result = Vec::new();
-                for item in iter {
-                    if let Ok(v) = item {
-                        result.push(Value::from(&v));
-                    }
+                for v in iter.flatten() {
+                    result.push(Value::from(&v));
                 }
                 Some(result)
             } else {
@@ -909,7 +905,7 @@ fn filter_slice(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     }
 
     if value.as_str().is_some() {
-        let s: String = result.iter().map(|v| value_to_string(v)).collect();
+        let s: String = result.iter().map(value_to_string).collect();
         return preserve_safety(value, s);
     }
     Value::List(result)
@@ -984,8 +980,8 @@ fn filter_unordered_list(value: &Value, _args: &[Value], autoescape: bool) -> Va
                     s
                 };
 
-                if i + 1 < items.len() {
-                    if let Some(sub) = as_sublist(&items[i + 1]) {
+                if i + 1 < items.len()
+                    && let Some(sub) = as_sublist(&items[i + 1]) {
                         let child = render_items(&sub, indent + 1, autoescape);
                         lines.push(format!(
                             "{tabs}<li>{s}\n{tabs}<ul>\n{child}\n{tabs}</ul>\n{tabs}</li>"
@@ -993,7 +989,6 @@ fn filter_unordered_list(value: &Value, _args: &[Value], autoescape: bool) -> Va
                         i += 2;
                         continue;
                     }
-                }
 
                 lines.push(format!("{tabs}<li>{s}</li>"));
                 i += 1;
@@ -1190,7 +1185,7 @@ fn insert_thousand_separators(s: &str) -> String {
             out.push(',');
         }
     }
-    for (i, chunk) in digits[head..].as_bytes().chunks(3).enumerate() {
+    for (i, chunk) in digits.as_bytes()[head..].chunks(3).enumerate() {
         if i > 0 {
             out.push(',');
         }
@@ -1343,16 +1338,15 @@ fn cached_django_callable(
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    static CACHE: Lazy<Mutex<HashMap<(usize, usize), Py<PyAny>>>> =
-        Lazy::new(|| Mutex::new(HashMap::new()));
+    type Cache = Mutex<HashMap<(usize, usize), Py<PyAny>>>;
+    static CACHE: Lazy<Cache> = Lazy::new(|| Mutex::new(HashMap::new()));
 
     let key = (module_path.as_ptr() as usize, func_name.as_ptr() as usize);
 
-    if let Ok(guard) = CACHE.lock() {
-        if let Some(f) = guard.get(&key) {
+    if let Ok(guard) = CACHE.lock()
+        && let Some(f) = guard.get(&key) {
             return Some(f.clone_ref(py));
         }
-    }
 
     let module = py.import(module_path).ok()?;
     let func = module.getattr(func_name).ok()?;
@@ -1370,11 +1364,10 @@ fn filter_date(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     if matches!(value, Value::None) {
         return Value::SafeString(String::new().into());
     }
-    if let Some(s) = value.as_str() {
-        if s.is_empty() {
+    if let Some(s) = value.as_str()
+        && s.is_empty() {
             return Value::SafeString(String::new().into());
         }
-    }
 
     Python::attach(|py| {
         // No-arg form needs DATE_FORMAT from settings; defer to Django.
@@ -1488,7 +1481,7 @@ fn filter_urlencode(value: &Value, args: &[Value], _autoescape: bool) -> Value {
 
 /// `json_script`: wrap value in `<script type="application/json">`.
 fn filter_json_script(value: &Value, args: &[Value], _autoescape: bool) -> Value {
-    let element_id = args.first().map(|a| value_to_string(a));
+    let element_id = args.first().map(value_to_string);
     let json_str = value_to_json(value);
     // Escape `</`, `<!--`, `-->` for safe HTML embedding.
     let safe_json = json_str
@@ -1680,8 +1673,8 @@ fn filter_stringformat(value: &Value, args: &[Value], _autoescape: bool) -> Valu
                 s
             } else if let Ok(width) = width_spec.parse::<usize>() {
                 format!("{s:>width$}")
-            } else if width_spec.starts_with('-') {
-                if let Ok(width) = width_spec[1..].parse::<usize>() {
+            } else if let Some(neg) = width_spec.strip_prefix('-') {
+                if let Ok(width) = neg.parse::<usize>() {
                     format!("{s:<width$}")
                 } else {
                     s
@@ -1847,6 +1840,7 @@ impl FilterId {
     /// `external_fn`. `external_fn` is a parameter so the registry
     /// HashMap doesn't import onto every call site.
     #[inline]
+    #[allow(clippy::type_complexity)]
     pub fn dispatch(
         self,
         value: &Value,

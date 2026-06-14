@@ -94,16 +94,11 @@ impl Token {
 
                 if !bit.ends_with(&sentinel) {
                     let mut trans_bit = vec![bit];
-                    loop {
-                        match bits.next() {
-                            Some(next_bit) => {
-                                let done = next_bit.ends_with(&sentinel);
-                                trans_bit.push(next_bit);
-                                if done {
-                                    break;
-                                }
-                            }
-                            None => break,
+                    for next_bit in bits.by_ref() {
+                        let done = next_bit.ends_with(&sentinel);
+                        trans_bit.push(next_bit);
+                        if done {
+                            break;
                         }
                     }
                     bit = trans_bit.join(" ");

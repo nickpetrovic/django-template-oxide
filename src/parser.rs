@@ -14,6 +14,9 @@ use crate::variable::{FilterExpression, ParsedFilter};
 pub type RustTagCompileFn =
     Rc<dyn Fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>>;
 
+/// Plain fn-pointer form used by the built-in tag registration tables.
+pub type TagCompileFn = fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>;
+
 /// Handler for `{% name %}`. Rust closure (built-ins) or Python
 /// callable (loaded via `{% load %}`).
 pub enum TagCompileFunc {

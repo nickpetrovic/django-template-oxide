@@ -44,14 +44,13 @@ impl Node for CacheNode {
         };
 
         // Check for empty string_if_invalid result (variable not found)
-        if let Value::String(ref s) = timeout_val {
-            if s.is_empty() {
+        if let Value::String(ref s) = timeout_val
+            && s.is_empty() {
                 return Err(TemplateError::TemplateSyntaxError(format!(
                     "\"cache\" tag got an unknown variable: {:?}",
                     self.expire_time_expr
                 )));
             }
-        }
 
         let timeout: Option<i64> = match &timeout_val {
             Value::Int(n) => Some(*n),
@@ -207,8 +206,7 @@ pub fn compile_cache(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>
     let mut end = bits.len();
     if bits.len() > 3 {
         let last = &bits[bits.len() - 1];
-        if last.starts_with("using=") {
-            let alias_str = &last["using=".len()..];
+        if let Some(alias_str) = last.strip_prefix("using=") {
             cache_alias = Some(parser.compile_filter(alias_str)?);
             end = bits.len() - 1;
         }

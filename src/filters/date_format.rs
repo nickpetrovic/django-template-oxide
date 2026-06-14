@@ -363,7 +363,7 @@ fn hour_12(h: u32) -> u32 {
 
 #[inline]
 fn ordinal_suffix(day: u32) -> &'static str {
-    if day >= 11 && day <= 13 {
+    if (11..=13).contains(&day) {
         return "th";
     }
     match day % 10 {

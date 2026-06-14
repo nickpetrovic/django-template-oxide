@@ -9,7 +9,7 @@ use crate::context::{Context, Value};
 use crate::errors::TemplateError;
 use crate::lexer::Token;
 use crate::nodes::{Node, NodeList, Origin};
-use crate::parser::Parser;
+use crate::parser::{Parser, TagCompileFn};
 use crate::variable::FilterExpression;
 
 #[allow(unused_imports)]
@@ -50,8 +50,8 @@ impl Node for TranslateNode {
             crate::variable::FilterExpressionVar::Constant(constant) => {
                 // Constants resolved at parse time; translate then
                 // re-apply filters.
-                if !self.noop {
-                    if let Some(msg) = constant.clone() {
+                if !self.noop
+                    && let Some(msg) = constant.clone() {
                         let translation = py.import("django.utils.translation").map_err(|e| {
                             TemplateError::Internal(format!("Cannot import translation: {e}"))
                         })?;
@@ -77,7 +77,6 @@ impl Node for TranslateNode {
 
                         fe.var = crate::variable::FilterExpressionVar::Constant(Some(translated));
                     }
-                }
             }
         }
 
@@ -90,11 +89,10 @@ impl Node for TranslateNode {
             self.message.var,
             crate::variable::FilterExpressionVar::Constant(_)
         );
-        if !self.noop && was_constant {
-            if let Value::SafeString(s) = output {
+        if !self.noop && was_constant
+            && let Value::SafeString(s) = output {
                 output = Value::String(s.to_string());
             }
-        }
 
         let mut value = crate::nodes::render_value_in_context(&output, context);
 
@@ -203,18 +201,17 @@ impl Node for BlockTranslateNode {
             extra_values.insert(name.clone(), val);
         }
 
-        if let Some(ref countervar) = self.countervar {
-            if let Some(ref counter_expr) = self.counter {
+        if let Some(ref countervar) = self.countervar
+            && let Some(ref counter_expr) = self.counter {
                 let count_val = resolve_expr(py, counter_expr, context);
                 extra_values.insert(countervar.clone(), count_val);
             }
-        }
 
         context.push_with(extra_values);
 
         // Counter must be numeric (Django raises TemplateSyntaxError).
-        if let Some(ref countervar) = self.countervar {
-            if let Some(val) = context.get(countervar) {
+        if let Some(ref countervar) = self.countervar
+            && let Some(val) = context.get(countervar) {
                 match val {
                     Value::Int(_) | Value::Float(_) => {}
                     _ => {
@@ -231,7 +228,6 @@ impl Node for BlockTranslateNode {
                     }
                 }
             }
-        }
 
         // Build msgid with `%(name)s` placeholders, matching Django's
         // BlockTranslateNode.render_token_list.
@@ -367,14 +363,13 @@ fn render_token_list(nodelist: &NodeList) -> (String, Vec<String>) {
             }
             NodeEntry::Boxed(node) => {
                 // Boxed VariableNodes possible via push() (not push_variable).
-                if let Some(var_node) = node.as_variable_node() {
-                    if let Some(token) = var_node.token() {
+                if let Some(var_node) = node.as_variable_node()
+                    && let Some(token) = var_node.token() {
                         let var_name = token.contents.trim().to_owned();
                         result.push_str(&format!("%({})", var_name));
                         result.push('s');
                         vars.push(var_name);
                     }
-                }
             }
         }
     }
@@ -405,11 +400,10 @@ fn interpolate_message_with_data(
                     name.push(c);
                     chars.next();
                 }
-                if let Some(&c) = chars.peek() {
-                    if c == 's' || c == 'd' || c == 'r' {
+                if let Some(&c) = chars.peek()
+                    && (c == 's' || c == 'd' || c == 'r') {
                         chars.next();
                     }
-                }
                 if let Some(val) = data.get(&name) {
                     result.push_str(val);
                 } else if let Some(val) = context.get(&name) {
@@ -996,10 +990,7 @@ pub fn compile_get_language_info_list(
 
 /// Register all i18n template tags on the parser.
 pub fn register_i18n_tags(parser: &mut Parser) {
-    let tags: Vec<(
-        &str,
-        fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>,
-    )> = vec![
+    let tags: Vec<(&str, TagCompileFn)> = vec![
         ("translate", compile_translate),
         ("trans", compile_translate),
         ("blocktranslate", compile_blocktranslate),

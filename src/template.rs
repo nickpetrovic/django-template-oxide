@@ -64,6 +64,7 @@ impl Template {
 
     /// `compile_nodelist` + engine builtins/libraries registration.
     /// `name` becomes the Origin (defaults to `UNKNOWN_SOURCE`).
+    #[allow(clippy::drop_non_drop)]
     pub fn compile_nodelist_with_engine<'py>(
         source: &str,
         name: Option<&str>,
@@ -76,7 +77,7 @@ impl Template {
         // is the canonical case). Without one: pure-Rust lexer.
         let tokens = {
             let _g = crate::prof::Guard::new("compile_nodelist:tokenize");
-            let use_python_lexer = engine.map_or(false, |eng| {
+            let use_python_lexer = engine.is_some_and(|eng| {
                 Python::attach(|py| needs_python_lexer(py, eng).unwrap_or(false))
             });
             if use_python_lexer {
@@ -107,28 +108,24 @@ impl Template {
             // engine.template_builtins is a list[Library]; register
             // each so `{% cotton %}` etc. are visible during parsing.
             if let Some(engine_obj) = engine {
-                if let Ok(builtins) = engine_obj.getattr(pyo3::intern!(py, "template_builtins")) {
-                    if let Ok(iter) = builtins.try_iter() {
-                        for lib_result in iter {
-                            if let Ok(lib) = lib_result {
-                                // Best-effort: skip libraries that raise.
-                                let _ = parser.add_python_library(py, &lib);
-                            }
+                if let Ok(builtins) = engine_obj.getattr(pyo3::intern!(py, "template_builtins"))
+                    && let Ok(iter) = builtins.try_iter() {
+                        for lib in iter.flatten() {
+                            // Best-effort: skip libraries that raise.
+                            let _ = parser.add_python_library(py, &lib);
                         }
                     }
-                }
 
                 // template_libraries: alias -> Library for {% load name %}
                 // resolution (the standard stock Django path).
-                if let Ok(libs) = engine_obj.getattr(pyo3::intern!(py, "template_libraries")) {
-                    if let Ok(libs_dict) = libs.cast::<pyo3::types::PyDict>() {
+                if let Ok(libs) = engine_obj.getattr(pyo3::intern!(py, "template_libraries"))
+                    && let Ok(libs_dict) = libs.cast::<pyo3::types::PyDict>() {
                         for (name, lib) in libs_dict.iter() {
                             if let Ok(name_str) = name.extract::<String>() {
                                 parser.libraries.insert(name_str, lib.unbind());
                             }
                         }
                     }
-                }
             }
 
             Ok(())
