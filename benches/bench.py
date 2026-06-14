@@ -696,9 +696,16 @@ def section_render(backends, item_count, iterations):
     )
     for label, src in RENDER_CASES:
         results = {}
+        try:
+            reference = backends["stock"].from_string(src).render(dict(ctx))
+        except Exception:
+            reference = None
         for be_name, be in backends.items():
             try:
                 tpl = be.from_string(src)
+                if reference is not None and tpl.render(dict(ctx)) != reference:
+                    results[be_name] = "ERROR: wrong output"
+                    continue
                 results[be_name] = _time_render(tpl, ctx, iterations)
             except Exception as e:  # pragma: no cover - bench best-effort
                 results[be_name] = _error_marker(e)

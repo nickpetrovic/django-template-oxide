@@ -88,9 +88,12 @@ stock Django degrades superlinearly past N=1000.
   (single slowest of N renders), that's the parenthetical column
   in the output. A high p99/mean ratio indicates the worst case is
   hitting GC pauses or dict resizes.
-- **Error handling**: when a backend can't run a case (rusty bails
-  on `WITH`, `CYCLE`, custom tags, etc.), we print `ERROR: <reason>`
-  inline so the comparison stays compact.
+- **Correctness**: each backend's output is verified against stock
+  Django; a divergent result is shown as `ERROR: wrong output` rather
+  than timed (a wrong result is not a faster one -- e.g. rusty silently
+  drops the `{% empty %}` block). When a backend can't run a case at
+  all (rusty bails on `WITH`, `CYCLE`, custom tags, etc.), we print
+  `ERROR: <reason>` inline so the comparison stays compact.
 
 ## Environment knobs
 

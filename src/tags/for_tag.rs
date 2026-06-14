@@ -260,6 +260,24 @@ fn visit_filter_expression(
     }
 }
 
+fn sequence_known_empty(py: Python<'_>, seq_value: &Value) -> bool {
+    match seq_value {
+        Value::List(items) => items.is_empty(),
+        v if v.as_str().is_some() => v.as_str().unwrap().is_empty(),
+        Value::PyObject(obj) => {
+            let bound = obj.bind(py);
+            if let Ok(list) = bound.cast::<pyo3::types::PyList>() {
+                list.is_empty()
+            } else if let Ok(tuple) = bound.cast::<pyo3::types::PyTuple>() {
+                tuple.is_empty()
+            } else {
+                bound.len().map_or(false, |n| n == 0)
+            }
+        }
+        _ => true,
+    }
+}
+
 impl ForNode {
     /// Streams output to `out`. Shared by `render` and `render_annotated_into`.
     fn render_body(
@@ -270,6 +288,12 @@ impl ForNode {
     ) -> Result<(), TemplateError> {
         let _g = crate::prof::Guard::new("ForNode::render");
         let seq_value = resolve_if_value(py, &self.sequence, context);
+
+        if let Some(ref empty_nodelist) = self.nodelist_empty {
+            if sequence_known_empty(py, &seq_value) {
+                return empty_nodelist.render_into(py, context, out);
+            }
+        }
 
         let items: Vec<Value> = match &seq_value {
             Value::List(items) => {
