@@ -37,8 +37,9 @@ broke Cotton-using projects in production. Cotton patches at
 `AppConfig.ready` time, before our first compile; we can't
 distinguish "stock Django" from "cotton-patched" by identity.
 
-For large templates the overhead is amortized and oxide wins by
-32x against rusty and 4x against stock.
+For large templates the overhead is amortized and oxide still wins
+comfortably: at 1000 items the FULL TEMPLATE renders ~8x faster than
+rusty and ~15x faster than stock.
 
 ## Templates compiled once, cached forever
 

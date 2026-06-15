@@ -48,5 +48,5 @@ on an M-series laptop. See `benches/README.md` for methodology.
 
 - Beats `django-rusty-templates` on every workload it can run.
 - Compile time scales linearly while rusty grows superlinearly:
-  oxide 12ms vs rusty 380ms on a 500-row template.
-- Render path is 5x-20x faster than stock Django across the board.
+  oxide 6.9ms vs rusty 349ms on a 500-row template.
+- Render path is 5x-40x faster than stock Django on typical workloads.

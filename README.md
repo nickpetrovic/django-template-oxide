@@ -69,25 +69,26 @@ unchanged.
 
 Numbers below are oxide against `django-rusty-templates` and stock
 Django, items=50, iters=200, on an M-series laptop. Smaller numbers
-are better. The full bench (22 render cases, 3 compile sizes,
+are better. The full bench (30 render cases, 3 compile sizes,
 scaling sweep) lives in `benches/bench.py`.
 
 | Workload                | Oxide    | Rusty       | Stock     |
 |-------------------------|----------|-------------|-----------|
-| TEXT ONLY               | 0.005ms  | 0.009ms     | 0.017ms   |
-| VARS ONLY (3 attrs)     | 0.018ms  | 0.124ms     | 0.276ms   |
-| FULL TEMPLATE           | 0.100ms  | 0.696ms     | 1.409ms   |
-| FILTER CHAIN (6-deep)   | 0.035ms  | unsupported | 0.626ms   |
-| WITH NESTED (4 levels)  | 0.115ms  | unsupported | 0.704ms   |
-| URL TAG                 | 0.465ms  | 0.477ms     | 0.664ms   |
-| INCLUDE LOOP            | 0.050ms  | unsupported | 0.431ms   |
-| INHERITANCE             | 0.068ms  | unsupported | 0.329ms   |
-| Compile SMALL (10 rows) | 0.171ms  | 0.190ms     | 0.805ms   |
-| Compile MEDIUM (100)    | 1.55ms   | 15.79ms     | 8.72ms    |
-| Compile LARGE (500)     | 7.85ms   | 390.59ms    | 46.06ms   |
+| TEXT ONLY               | 0.005ms  | 0.011ms     | 0.019ms   |
+| VARS ONLY (3 attrs)     | 0.019ms  | 0.159ms     | 0.296ms   |
+| FULL TEMPLATE           | 0.104ms  | 0.836ms     | 1.513ms   |
+| FILTER CHAIN (6-deep)   | 0.032ms  | unsupported | 0.684ms   |
+| WITH NESTED (4 levels)  | 0.103ms  | unsupported | 0.754ms   |
+| NESTED LOOP (apps×tags) | 0.061ms  | 0.123ms     | 0.784ms   |
+| URL TAG                 | 0.455ms  | 0.543ms     | 0.722ms   |
+| INCLUDE LOOP            | 0.042ms  | unsupported | 0.457ms   |
+| INHERITANCE             | 0.071ms  | unsupported | 0.344ms   |
+| Compile SMALL (10 rows) | 0.158ms  | 0.189ms     | 0.915ms   |
+| Compile MEDIUM (100)    | 1.38ms   | 14.29ms     | 9.52ms    |
+| Compile LARGE (500)     | 6.93ms   | 349.05ms    | 49.38ms   |
 
 Oxide wins every render and compile workload, including small
-template compilation where it now beats rusty (0.171ms vs 0.190ms).
+template compilation where it now beats rusty (0.158ms vs 0.189ms).
 Compile time scales linearly while rusty grows superlinearly. See
 `benches/README.md` for methodology and how to reproduce.
 

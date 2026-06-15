@@ -67,14 +67,14 @@ Three sizes:
 
 This isolates lex+parse from render. Templates are typically
 compile-once-render-many in production, so compile time matters
-less than render time, but a 30x gap (oxide vs rusty on LARGE) is
+less than render time, but a 50x gap (oxide vs rusty on LARGE) is
 worth knowing about.
 
 ### Section 3: scaling sweep
 
 The FULL TEMPLATE rendered at items ∈ {1, 10, 100, 1000}. Reports
 `ns/item` for the oxide column so you can see per-row cost across
-input sizes. Oxide stabilizes at ~1900 ns/item from N=100 upward;
+input sizes. Oxide stabilizes at ~2000 ns/item from N=100 upward;
 stock Django degrades superlinearly past N=1000.
 
 ## Methodology
