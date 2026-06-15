@@ -262,7 +262,8 @@ fn visit_filter_expression(
 fn sequence_known_empty(py: Python<'_>, seq_value: &Value) -> bool {
     match seq_value {
         Value::List(items) => items.is_empty(),
-        v if v.as_str().is_some() => v.as_str().unwrap().is_empty(),
+        Value::String(s) => s.is_empty(),
+        Value::SafeString(s) => s.is_empty(),
         Value::PyObject(obj) => {
             let bound = obj.bind(py);
             if let Ok(list) = bound.cast::<pyo3::types::PyList>() {
@@ -302,8 +303,8 @@ impl ForNode {
                     items.clone()
                 }
             }
-            v if v.as_str().is_some() => {
-                let s = v.as_str().unwrap();
+            v @ (Value::String(_) | Value::SafeString(_)) => {
+                let s = v.as_str().expect("matched String or SafeString");
                 let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
                 if self.is_reversed {
                     chars.into_iter().rev().collect()

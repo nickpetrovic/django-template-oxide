@@ -536,7 +536,7 @@ fn render_block_super(
     if bc.get_block(block_name).is_none() {
         return Ok(String::new());
     }
-    let parent_ref = bc.pop(block_name).unwrap();
+    let parent_ref = bc.pop(block_name).expect("block presence checked above");
 
     // Recursively get this parent's own block.super
     let parent_super_content = render_block_super(py, context, block_name)?;

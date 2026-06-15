@@ -305,7 +305,7 @@ impl Node for BlockTranslateNode {
 
         // Data dict for `%(name)s`; mirrors Django's `render_value`.
         // Missing vars use string_if_invalid.
-        let mut all_vars = singular_vars.clone();
+        let mut all_vars = singular_vars;
         if let Some(ref plural_nl) = self.plural {
             let (_, plural_vars) = render_token_list(plural_nl);
             for v in plural_vars {

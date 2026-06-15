@@ -211,7 +211,7 @@ fn filter_capfirst(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
         return preserve_safety(value, out);
     }
     let mut chars = s.chars();
-    let first = chars.next().unwrap();
+    let first = chars.next().expect("s is non-empty (checked above)");
     let mut out = String::with_capacity(s.len());
     for uc in first.to_uppercase() {
         out.push(uc);
@@ -1199,11 +1199,12 @@ fn insert_thousand_separators(s: &str) -> String {
             out.push(',');
         }
     }
-    for (i, chunk) in digits.as_bytes()[head..].chunks(3).enumerate() {
+    let rest = &digits[head..];
+    for (i, start) in (0..rest.len()).step_by(3).enumerate() {
         if i > 0 {
             out.push(',');
         }
-        out.push_str(std::str::from_utf8(chunk).unwrap());
+        out.push_str(&rest[start..(start + 3).min(rest.len())]);
     }
     format!("{sign}{out}{dec_part}")
 }
@@ -1388,7 +1389,9 @@ fn filter_date(value: &Value, args: &[Value], _autoescape: bool) -> Value {
     Python::attach(|py| {
         // No-arg form needs DATE_FORMAT from settings; defer to Django.
         let format_str = match args.first() {
-            Some(v) if v.as_str().is_some() => Cow::Borrowed(v.as_str().unwrap()),
+            Some(v) if v.as_str().is_some() => {
+                Cow::Borrowed(v.as_str().expect("guard verified as_str() is Some"))
+            }
             Some(other) => Cow::Owned(other.to_string()),
             None => {
                 return call_django_filter("django.template.defaultfilters", "date", value, args);

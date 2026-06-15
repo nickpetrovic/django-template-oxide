@@ -269,7 +269,7 @@ impl NodeList {
     }
 
     /// Append a node. TextNodes get unwrapped into `NodeEntry::Text`
-    /// for direct dispatch; other nodes stay boxed. Use [`push_variable`]
+    /// for direct dispatch; other nodes stay boxed. Use `push_variable`
     /// directly to avoid trait-object indirection for VariableNodes.
     pub fn push(&mut self, node: Box<dyn Node>) {
         if let Some(text_arc) = node.as_text_arc() {
@@ -307,7 +307,7 @@ impl NodeList {
         Ok(SafeString::new(parts))
     }
 
-    /// In-place equivalent of [`render`]. Container nodes stream child
+    /// In-place equivalent of `render`. Container nodes stream child
     /// output into the surrounding buffer without intermediate allocations.
     #[inline]
     pub fn render_into(

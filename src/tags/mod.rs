@@ -876,7 +876,10 @@ impl Node for CycleNode {
                                     None => Value::None,
                                 });
                             } else {
-                                let var = arg.variable.as_ref().unwrap();
+                                let var = arg
+                                    .variable
+                                    .as_ref()
+                                    .expect("lookup args always carry a variable");
                                 let parts: Vec<&str> = var.var.split('.').collect();
                                 let resolved = match context.get(parts[0]) {
                                     Some(v) => v.clone(),

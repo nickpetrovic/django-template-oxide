@@ -35,6 +35,7 @@ impl From<String> for SafeString {
 }
 
 /// `django.utils.html.escape`.
+#[must_use]
 pub fn html_escape(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     html_escape_into(input, &mut output);
@@ -73,6 +74,7 @@ pub fn html_escape_into(input: &str, output: &mut String) {
 }
 
 /// `django.utils.html.conditional_escape`.
+#[must_use]
 pub fn conditional_escape(input: &str, is_safe: bool) -> SafeString {
     if is_safe {
         SafeString::new(input)

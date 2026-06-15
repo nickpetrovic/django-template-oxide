@@ -52,3 +52,11 @@ There is currently no cache invalidation hook. In production this
 is fine (templates don't change). In dev with autoreload it means
 template edits don't take effect until process restart. A
 `clear_template_caches()` function will land before 1.0.
+
+## Free-threaded Python (3.13t / 3.14t)
+
+The extension targets the standard GIL build and is not yet validated
+against free-threaded (no-GIL) Python. The engine is GIL-bound today (it
+holds the GIL across a render via `Python::attach`) and uses thread-local
+caches, so it is thread-safe under the GIL but does not advertise
+`gil_used = false`. Free-threaded support is a post-1.0 consideration.

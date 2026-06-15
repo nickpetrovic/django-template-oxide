@@ -543,10 +543,10 @@ impl PyParser {
     #[getter]
     fn extra_data(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
         let parser = self.parser();
-        if parser.python_extra_data.is_none() {
-            parser.python_extra_data = Some(pyo3::types::PyDict::new(py).unbind());
-        }
-        Ok(parser.python_extra_data.as_ref().unwrap().clone_ref(py))
+        let dict = parser
+            .python_extra_data
+            .get_or_insert_with(|| pyo3::types::PyDict::new(py).unbind());
+        Ok(dict.clone_ref(py))
     }
 
     /// Mirrors `Parser.find_filter` (base.py:678).

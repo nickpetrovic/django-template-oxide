@@ -137,14 +137,23 @@ where rusty bails. Make your own call.
 
 ## Testing
 
-Build the extension, then run the suites:
+Build the extension, then run the suites — or run the whole local quality
+gate (fmt, clippy, rust tests, rustdoc, unused-deps, advisories, the Python
+suite, and the differential fuzzer) with `scripts/check.sh`:
 
 ```sh
 uv sync --group dev
 uvx maturin develop --release   # rebuild after any Rust change
-uv run pytest tests/            # 2476 Python tests (2474 pass, 2 skipped)
+uv run pytest tests/            # 2476 Python tests (2473 pass, 2 skipped, 1 deselected)
 cargo test                      # 331 Rust unit tests
+scripts/check.sh                # everything above + lint/doc/audit/fuzzer
 ```
+
+> **Recent macOS (26+):** the release profile strips the dylib, which trips
+> a dyld `LINKEDIT` loader bug on current macOS. Build with
+> `CARGO_PROFILE_RELEASE_STRIP=false` (e.g.
+> `CARGO_PROFILE_RELEASE_STRIP=false uvx maturin develop --release`).
+> Linux and CI are unaffected.
 
 The Python suite is 962 tests in oxide's own regression/compliance
 suite plus 1514 vendored Django `template_tests` routed through the

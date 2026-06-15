@@ -21,7 +21,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
-    /// Marked safe; not auto-escaped. Arc<str> for O(1) clone.
+    /// Marked safe; not auto-escaped. `Arc<str>` for O(1) clone.
     SafeString(std::sync::Arc<str>),
     List(Vec<Value>),
     Dict(ValueMap),
@@ -505,14 +505,14 @@ impl BaseContext {
 
     /// Matches `BaseContext.setdefault`.
     pub fn setdefault(&mut self, key: &str, default: Value) -> &Value {
-        if self.contains(key) {
-            return self.get(key).unwrap();
+        if !self.contains(key) {
+            self.dicts
+                .last_mut()
+                .expect("dicts always has at least one layer")
+                .insert(key.to_owned(), default);
         }
-        self.dicts
-            .last_mut()
-            .expect("dicts always has at least one layer")
-            .insert(key.to_owned(), default);
-        self.dicts.last().unwrap().get(key).unwrap()
+        self.get(key)
+            .expect("key is present after insert or was already present")
     }
 
     /// Higher scopes override lower. Matches `BaseContext.flatten`.

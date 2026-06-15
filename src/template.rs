@@ -82,7 +82,12 @@ impl Template {
             });
             if use_python_lexer {
                 Python::attach(|py| -> Result<Vec<crate::lexer::Token>, TemplateError> {
-                    py_tokenize_via_django(py, source, debug, engine.unwrap())
+                    py_tokenize_via_django(
+                        py,
+                        source,
+                        debug,
+                        engine.expect("use_python_lexer is only true when engine is Some"),
+                    )
                 })?
             } else if debug {
                 let mut lexer = DebugLexer::new(source);

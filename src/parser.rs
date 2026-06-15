@@ -627,7 +627,7 @@ mod tests {
         let first = parser.next_token();
         assert_eq!(first.contents, "a");
 
-        parser.prepend_token(first.clone());
+        parser.prepend_token(first);
         let again = parser.next_token();
         assert_eq!(again.contents, "a");
     }

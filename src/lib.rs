@@ -1,3 +1,38 @@
+//! A Rust implementation of Django's template engine, exposed to Python
+//! via [PyO3] as the `django_template_oxide._rust` extension module.
+//!
+//! It is a drop-in replacement for Django's template backend: Django's
+//! loader chain, settings, and `Library` tag/filter API are reused, while
+//! templates are compiled and rendered in Rust. Configure it in
+//! `settings.py`:
+//!
+//! ```python
+//! TEMPLATES = [{
+//!     "BACKEND": "django_template_oxide.backend.OxideTemplates",
+//!     "DIRS": [...],
+//!     "APP_DIRS": True,
+//!     "OPTIONS": {...},
+//! }]
+//! ```
+//!
+//! # Crate layout
+//!
+//! The crate builds both as a `cdylib` (the Python extension) and an
+//! `rlib` (so the engine can be embedded or unit-tested from Rust). Python
+//! entry points live in [`py_bindings`] and [`django_drop_in`]; the engine
+//! internals are split across [`lexer`], [`parser`], [`nodes`], [`tags`],
+//! [`filters`], [`context`], and [`template`].
+//!
+//! # Panics
+//!
+//! Compilation and rendering are designed not to panic on malformed
+//! template input; recoverable failures surface as
+//! [`errors::TemplateError`] and are converted to Python exceptions at the
+//! FFI boundary. The few remaining `expect()` calls document genuine
+//! internal invariants.
+//!
+//! [PyO3]: https://pyo3.rs
+
 pub mod body_program;
 pub mod context;
 pub mod django_drop_in;
