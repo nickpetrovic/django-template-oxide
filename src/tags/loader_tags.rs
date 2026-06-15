@@ -474,7 +474,7 @@ impl Node for BlockNode {
         // chains like grandchild -> child -> parent all work.
         let super_content = render_block_super(py, context, &self.name)?;
 
-        let mut block_dict = indexmap::IndexMap::new();
+        let mut block_dict = crate::context::ValueMap::default();
         block_dict.insert("super".to_string(), Value::SafeString(super_content.into()));
         context.push_with({
             let mut m = HashMap::new();
@@ -539,7 +539,7 @@ fn render_block_super(
     let parent_super_content = render_block_super(py, context, block_name)?;
 
     // Set up block.super for the parent's render
-    let mut block_dict = indexmap::IndexMap::new();
+    let mut block_dict = crate::context::ValueMap::default();
     block_dict.insert(
         "super".to_string(),
         Value::SafeString(parent_super_content.into()),

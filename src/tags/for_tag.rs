@@ -375,7 +375,8 @@ impl ForNode {
             // Build once, mutate in place per iteration via index access.
             // Fixed order: 0 counter, 1 counter0, 2 revcounter,
             // 3 revcounter0, 4 first, 5 last, 6 length, [7 parentloop].
-            let mut forloop = indexmap::IndexMap::with_capacity(8);
+            let mut forloop =
+                crate::context::ValueMap::with_capacity_and_hasher(8, Default::default());
             forloop.insert("counter".to_owned(), Value::Int(0));
             forloop.insert("counter0".to_owned(), Value::Int(0));
             forloop.insert("revcounter".to_owned(), Value::Int(0));

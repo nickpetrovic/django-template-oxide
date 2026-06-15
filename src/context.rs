@@ -73,6 +73,8 @@ impl Hasher for FastHasher {
 /// FastHasher-backed HashMap for context dict storage.
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
+pub type ValueMap = IndexMap<String, Value, BuildHasherDefault<FastHasher>>;
+
 /// Any value that can appear in a Django template context. Python types
 /// not mappable to a Rust variant stay `Py<PyAny>`. `SafeString` uses
 /// `Arc<str>` for O(1) clone in filter-constant hot paths.
@@ -86,7 +88,7 @@ pub enum Value {
     /// Marked safe; not auto-escaped. Arc<str> for O(1) clone.
     SafeString(std::sync::Arc<str>),
     List(Vec<Value>),
-    Dict(IndexMap<String, Value>),
+    Dict(ValueMap),
     /// Escape hatch: arbitrary Python object behind the GIL.
     PyObject(Py<PyAny>),
 }
@@ -216,7 +218,7 @@ impl From<HashMap<String, Value>> for Value {
 
 impl From<IndexMap<String, Value>> for Value {
     fn from(m: IndexMap<String, Value>) -> Self {
-        Value::Dict(m)
+        Value::Dict(m.into_iter().collect())
     }
 }
 
