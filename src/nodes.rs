@@ -975,7 +975,7 @@ fn resolve_pyobject_lookups(
     let mut current = start.clone();
 
     // Primitives/collections are never callable in template terms.
-    if !is_primitive_or_collection(&current) && current.is_callable() {
+    if !is_primitive_or_collection(&current) && type_is_callable(&current) {
         let do_not_call = current
             .getattr("do_not_call_in_templates")
             .ok()
@@ -1316,19 +1316,22 @@ fn is_primitive_or_collection(obj: &Bound<'_, pyo3::PyAny>) -> bool {
         || obj.is_exact_instance_of::<PyBool>()
 }
 
+type FastHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<crate::context::FastHasher>>;
+
 thread_local! {
     /// Per-type cache of `__getitem__` and callable bits. Holds a
     /// strong `Py<PyType>` so addresses can't be reused for different
     /// types after GC (the cache is keyed by type-pointer address).
     static TYPE_BEHAVIOR_CACHE: std::cell::RefCell<
-        std::collections::HashMap<usize, (Py<pyo3::types::PyType>, TypeBehavior)>
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+        FastHashMap<usize, (Py<pyo3::types::PyType>, TypeBehavior)>
+    > = std::cell::RefCell::new(FastHashMap::default());
 
     /// Interned `Py<PyString>` for attribute names. Without this each
     /// `getattr(name)` reallocates a PyString despite name being static.
     static PYSTRING_INTERN_CACHE: std::cell::RefCell<
-        std::collections::HashMap<String, Py<pyo3::types::PyString>>
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+        FastHashMap<String, Py<pyo3::types::PyString>>
+    > = std::cell::RefCell::new(FastHashMap::default());
 }
 
 /// Interned `Py<PyString>` for `name`. First sighting allocates and
