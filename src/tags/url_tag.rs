@@ -1,5 +1,6 @@
 //! `{% url %}`. Port of `defaulttags.url`.
 
+use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 
 use crate::context::{Context, Value};
@@ -11,6 +12,8 @@ use crate::parser::Parser;
 use crate::variable::FilterExpression;
 
 use super::resolve_if_value;
+
+static REVERSE_FN: OnceCell<Py<PyAny>> = OnceCell::new();
 
 #[derive(Debug)]
 pub struct UrlNode {
@@ -40,11 +43,16 @@ impl Node for UrlNode {
             .collect();
 
         let url_result: Result<String, TemplateError> = (|| {
-            let reverse = py
-                .import("django.urls")
-                .map_err(|e| TemplateError::Internal(format!("Failed to import django.urls: {e}")))?
-                .getattr("reverse")
-                .map_err(|e| TemplateError::Internal(format!("Failed to get reverse: {e}")))?;
+            let reverse = REVERSE_FN
+                .get_or_try_init(|| {
+                    py.import("django.urls")
+                        .and_then(|m| m.getattr("reverse"))
+                        .map(Bound::unbind)
+                })
+                .map_err(|e: PyErr| {
+                    TemplateError::Internal(format!("Failed to get django.urls.reverse: {e}"))
+                })?
+                .bind(py);
 
             let py_args = if args.is_empty() {
                 None
