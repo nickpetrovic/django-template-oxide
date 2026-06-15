@@ -733,6 +733,12 @@ fn filter_join(value: &Value, args: &[Value], autoescape: bool) -> Value {
 
     let items: Option<Vec<Value>> = match value {
         Value::List(items) => Some(items.clone()),
+        // Django joins any iterable; iterating a str yields its plain
+        // (escapable) chars.
+        Value::String(s) => Some(s.chars().map(|c| Value::String(c.to_string())).collect()),
+        Value::SafeString(s) => {
+            Some(s.chars().map(|c| Value::String(c.to_string())).collect())
+        }
         Value::PyObject(obj) => Python::attach(|py| {
             let bound = obj.bind(py);
             if let Ok(iter) = bound.try_iter() {
@@ -1050,29 +1056,8 @@ fn filter_add(value: &Value, args: &[Value], _autoescape: bool) -> Value {
         }
     }
 
-    // Mixed string + PyObject: stringify and concatenate.
-    let val_str = match value {
-        Value::String(s) => Some(s.clone()),
-        Value::SafeString(s) => Some(s.to_string()),
-        Value::PyObject(_) => {
-            let s = value_to_string(value);
-            if !s.is_empty() { Some(s) } else { None }
-        }
-        _ => None,
-    };
-    let arg_str = match &arg {
-        Value::String(s) => Some(s.clone()),
-        Value::SafeString(s) => Some(s.to_string()),
-        Value::PyObject(_) => {
-            let s = value_to_string(&arg);
-            if !s.is_empty() { Some(s) } else { None }
-        }
-        _ => None,
-    };
-    if let (Some(a), Some(b)) = (val_str, arg_str) {
-        return preserve_safety(value, format!("{a}{b}"));
-    }
-
+    // Django's `add` returns "" when neither `int(value) + int(arg)` nor
+    // `value + arg` (str/list/tuple concat, date+timedelta, ...) succeeds.
     Value::String(String::new())
 }
 
@@ -1613,16 +1598,9 @@ fn value_to_json(v: &Value) -> String {
 
 /// `make_list`: string -> chars, integer -> digits.
 fn filter_make_list(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
-    if let Some(s) = value.as_str() {
-        return Value::List(s.chars().map(|c| Value::String(c.to_string())).collect());
-    }
-    match value {
-        Value::Int(n) => {
-            let s = n.to_string();
-            Value::List(s.chars().map(|c| Value::String(c.to_string())).collect())
-        }
-        _ => Value::List(Vec::new()),
-    }
+    // Django `defaultfilters.make_list`: `list(str(value))`.
+    let s = value_to_string(value);
+    Value::List(s.chars().map(|c| Value::String(c.to_string())).collect())
 }
 
 /// `phone2numeric`: letter -> digit on a phone keypad.

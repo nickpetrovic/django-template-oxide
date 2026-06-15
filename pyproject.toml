@@ -59,6 +59,7 @@ dev = [
   "pytest>=7",
   "numpy",
   "jinja2",
+  "hypothesis>=6",
   "django-rusty-templates @ git+https://github.com/LilyFirefly/django-rusty-templates.git",
 ]
 docs = [
