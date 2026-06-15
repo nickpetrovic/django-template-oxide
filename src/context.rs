@@ -726,6 +726,26 @@ impl Context {
         }
     }
 
+    pub fn from_pairs<I>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (String, Value)>,
+    {
+        let iter = pairs.into_iter();
+        let mut inner =
+            InternalDict::with_capacity_and_hasher(iter.size_hint().0, Default::default());
+        for (k, v) in iter {
+            match k.as_str() {
+                "True" | "False" | "None" => {}
+                _ => {
+                    inner.insert(k, v);
+                }
+            }
+        }
+        let mut ctx = Self::new(None);
+        ctx.base.dicts.push(inner);
+        ctx
+    }
+
     pub fn push(&mut self) {
         self.base.push();
     }

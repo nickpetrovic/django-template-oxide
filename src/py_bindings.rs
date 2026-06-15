@@ -790,12 +790,11 @@ impl PyTemplate {
                     pyctx.borrow().inner.clone()
                 } else if let Ok(d) = obj.cast::<PyDict>() {
                     let _g = crate::prof::Guard::new("PyTemplate::render:from_dict");
-                    let mut map = HashMap::new();
+                    let mut pairs: Vec<(String, Value)> = Vec::with_capacity(d.len());
                     for (k, v) in d.iter() {
-                        let key: String = k.extract()?;
-                        map.insert(key, Value::from(&v));
+                        pairs.push((k.extract()?, Value::from(&v)));
                     }
-                    ctx::Context::new(Some(map))
+                    ctx::Context::from_pairs(pairs)
                 } else if obj.hasattr(pyo3::intern!(py, "flatten")).unwrap_or(false)
                     && obj
                         .hasattr(pyo3::intern!(py, "autoescape"))
@@ -807,12 +806,11 @@ impl PyTemplate {
                     let flat_dict = flat.cast::<PyDict>().map_err(|_| {
                         PyRuntimeError::new_err("Context.flatten() did not return a dict")
                     })?;
-                    let mut map = HashMap::new();
+                    let mut pairs: Vec<(String, Value)> = Vec::with_capacity(flat_dict.len());
                     for (k, v) in flat_dict.iter() {
-                        let key: String = k.extract()?;
-                        map.insert(key, Value::from(&v));
+                        pairs.push((k.extract()?, Value::from(&v)));
                     }
-                    let mut ctx = ctx::Context::new(Some(map));
+                    let mut ctx = ctx::Context::from_pairs(pairs);
                     if let Ok(ae) = obj.getattr(pyo3::intern!(py, "autoescape")) {
                         ctx.autoescape = ae.extract::<bool>().unwrap_or(true);
                     }
