@@ -383,19 +383,72 @@ fn filter_slugify(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
 
 /// `striptags`: drop every `<...>` span. Mirrors `strip_tags`, no
 /// whitespace insertion or collapsing at tag boundaries.
-fn filter_striptags(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
-    let s = value_to_string(value);
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
+fn strip_tags_once(chars: &[char]) -> String {
+    let n = chars.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        if chars[i] != '<' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let next = chars.get(i + 1).copied();
+        let tagish =
+            matches!(next, Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!' || c == '?');
+        if !tagish {
+            out.push('<');
+            i += 1;
+            continue;
+        }
+        if chars[i + 1..].starts_with(&['!', '-', '-']) {
+            if let Some(end) = (i + 4..n).find(|&k| chars[k..].starts_with(&['-', '-', '>'])) {
+                i = end + 3;
+            } else {
+                out.push('<');
+                i += 1;
+            }
+            continue;
+        }
+        let mut j = i + 1;
+        let mut quote: Option<char> = None;
+        let mut closed = None;
+        while j < n {
+            let c = chars[j];
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == '\'' || c == '"' => quote = Some(c),
+                None if c == '>' => {
+                    closed = Some(j);
+                    break;
+                }
+                None => {}
+            }
+            j += 1;
+        }
+        match closed {
+            Some(end) => i = end + 1,
+            None => {
+                out.push('<');
+                i += 1;
+            }
         }
     }
-    Value::String(out)
+    out
+}
+
+fn filter_striptags(value: &Value, _args: &[Value], _autoescape: bool) -> Value {
+    let mut s = value_to_string(value);
+    while s.contains('<') && s.contains('>') {
+        let chars: Vec<char> = s.chars().collect();
+        let stripped = strip_tags_once(&chars);
+        if s.matches('<').count() == stripped.matches('<').count() {
+            break;
+        }
+        s = stripped;
+    }
+    Value::String(s)
 }
 
 /// `title`: titlecase, with Django's apostrophe fixup so `"it's"` ->
@@ -752,7 +805,7 @@ fn filter_join(value: &Value, args: &[Value], autoescape: bool) -> Value {
             let out = parts.join(&sep);
             Value::SafeString(out.into())
         }
-        None => preserve_safety(value, value_to_string(value)),
+        None => value.clone(),
     }
 }
 
@@ -1003,9 +1056,6 @@ fn filter_add(value: &Value, args: &[Value], _autoescape: bool) -> Value {
 
     if let (Some(a), Some(b)) = (coerce_to_i64(value), coerce_to_i64(&arg)) {
         return Value::Int(a + b);
-    }
-    if let (Some(a), Some(b)) = (coerce_to_f64(value), coerce_to_f64(&arg)) {
-        return Value::Float(a + b);
     }
 
     match (value, &arg) {
