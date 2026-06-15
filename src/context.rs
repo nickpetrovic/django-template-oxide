@@ -147,30 +147,15 @@ impl fmt::Display for Value {
             Value::Float(n) => write!(f, "{n}"),
             Value::String(s) => write!(f, "{s}"),
             Value::SafeString(s) => f.write_str(s),
-            Value::List(items) => {
-                write!(f, "[")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    // Django uses repr-style: strings quoted with single quotes.
-                    match v {
-                        Value::String(s) => write!(f, "'{s}'")?,
-                        Value::SafeString(s) => write!(f, "'{}'", s.as_ref())?,
-                        _ => write!(f, "{v}")?,
-                    }
-                }
-                write!(f, "]")
-            }
-            Value::Dict(map) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "'{k}': {v}")?;
-                }
-                write!(f, "}}")
+            Value::List(_) | Value::Dict(_) => {
+                let s = Python::attach(|py| {
+                    self.to_pyobject(py)
+                        .bind(py)
+                        .str()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| "<repr failed>".to_owned())
+                });
+                f.write_str(&s)
             }
             Value::PyObject(obj) => {
                 // Call Python's str() to get the string representation.

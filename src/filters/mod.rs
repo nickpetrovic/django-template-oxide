@@ -33,25 +33,7 @@ fn value_to_string(v: &Value) -> String {
         Value::Float(n) => format_float(*n),
         Value::String(s) => s.clone(),
         Value::SafeString(s) => s.to_string(),
-        Value::List(items) => {
-            let mut out = String::from("[");
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                // Django uses repr-style quoting for strings inside lists.
-                if let Some(s) = item.as_str() {
-                    out.push('\'');
-                    out.push_str(s);
-                    out.push('\'');
-                } else {
-                    out.push_str(&value_to_string(item));
-                }
-            }
-            out.push(']');
-            out
-        }
-        Value::Dict(_) => format!("{v}"),
+        Value::List(_) | Value::Dict(_) => format!("{v}"),
         Value::PyObject(obj) => Python::attach(|py| {
             obj.bind(py)
                 .str()
