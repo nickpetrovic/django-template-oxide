@@ -482,7 +482,7 @@ fn filter_truncatewords(value: &Value, args: &[Value], _autoescape: bool) -> Val
     let max_words = max_words as usize;
     let words: Vec<&str> = s.split_whitespace().collect();
     if words.len() <= max_words {
-        return preserve_safety(value, s);
+        return preserve_safety(value, words.join(" "));
     }
     let truncated = words[..max_words].join(" ");
     let out = format!("{truncated} \u{2026}");
