@@ -22,7 +22,7 @@ pyo3 = { version = "0.29", features = ["py-clone"] }
 thiserror = "2"
 regex = "1"
 once_cell = "1"
-compact_str = "0.8"
+compact_str = "0.9"
 indexmap = "2"
 foldhash = "0.2"
 unicode-normalization = "0.1"
