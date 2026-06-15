@@ -2,7 +2,7 @@
 name = "django-template-oxide"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A Rust implementation of Django's template engine, exposed as a Python extension via PyO3."
 authors = ["Nick Petrovic"]
 license = "MIT"
