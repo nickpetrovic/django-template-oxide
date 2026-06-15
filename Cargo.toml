@@ -18,7 +18,7 @@ extension-module = ["pyo3/extension-module"]
 prof = []
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["py-clone"] }
+pyo3 = { version = "0.29", features = ["py-clone"] }
 thiserror = "2"
 regex = "1"
 once_cell = "1"
@@ -27,7 +27,7 @@ indexmap = "2"
 unicode-normalization = "0.1"
 
 [dev-dependencies]
-pyo3 = { version = "0.28", features = ["auto-initialize", "py-clone"] }
+pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"] }
 
 [profile.release]
 lto = true
