@@ -61,6 +61,12 @@ _LOCMEM_TEMPLATES = {
         "</table>"
         "{% endblock %}"
     ),
+    # 3-level chain (grandchild -> child -> base) exercising block.super.
+    "bench_grandchild.html": (
+        '{% extends "bench_child.html" %}'
+        "{% block title %}GC: {{ block.super }}{% endblock %}"
+        "{% block header %}{{ block.super }}<nav>menu</nav>{% endblock %}"
+    ),
 }
 
 
@@ -560,6 +566,30 @@ RENDER_CASES = [
             "{% endfor %}"
         ),
     ),
+    # regroup tag (consecutive grouping by attribute).
+    (
+        "REGROUP (by status)",
+        (
+            "{% regroup applications by status as grouped %}"
+            "{% for g in grouped %}{{ g.grouper }}("
+            "{% for a in g.list %}{{ a.id }},{% endfor %})"
+            "{% endfor %}"
+        ),
+    ),
+    # Filter with a variable (lookup) argument, not a constant.
+    (
+        "FILTER VAR ARG (default:var)",
+        (
+            "{% for app in applications %}"
+            "{{ app.posting.title|default:app.candidate.name }}"
+            "{% endfor %}"
+        ),
+    ),
+    # 3-level inheritance (grandchild -> child -> base) with block.super.
+    (
+        "INHERITANCE 3-LEVEL (block.super)",
+        "{% include 'bench_grandchild.html' %}",
+    ),
     # Inheritance + include (loader-backed).
     (
         "INCLUDE LOOP (50 includes)",
@@ -797,6 +827,43 @@ def section_scaling(backends, iterations):
         print(_format_row(f"items={n:6d}", results, has_rusty) + suffix)
 
 
+def section_context_entry(backends, item_count, iterations):
+    """Entry-path costs the dict fast path doesn't cover: rendering with a
+    Django ``Context`` object (oxide flattens it; stock renders natively)
+    via the low-level engine template, and a wide top-level context that
+    stresses the dict->context conversion."""
+    from django.template import Context as DjContext
+
+    has_rusty = "rusty" in backends
+    _print_header(f"CONTEXT ENTRY  (items={item_count}, iters={iterations})", has_rusty)
+
+    apps = _build_applications(item_count)
+    narrow = {"applications": apps}
+    wide = {**{f"k{i}": i for i in range(200)}, "applications": apps}
+
+    def _dict_runner(be, ctx):
+        tpl = be.from_string(_FULL_TEMPLATE)
+        return lambda: tpl.render(ctx)
+
+    def _ctx_runner(be, ctx):
+        low = be.from_string(_FULL_TEMPLATE).template
+        dj_ctx = DjContext(ctx)
+        return lambda: low.render(dj_ctx)
+
+    for label, factory, ctx in [
+        ("dict (fast path)", _dict_runner, narrow),
+        ("Context obj (low-level)", _ctx_runner, narrow),
+        ("wide dict (+200 keys)", _dict_runner, wide),
+    ]:
+        results = {}
+        for be_name, be in backends.items():
+            try:
+                results[be_name] = _time_render(factory(be, ctx), None, iterations)
+            except Exception as e:  # pragma: no cover - bench best-effort
+                results[be_name] = _error_marker(e)
+        print(_format_row(label, results, has_rusty))
+
+
 def section_prof(backends, ctx, iterations):
     """If the FFI profiler is compiled in, print per-zone totals."""
     print("\n--- oxide profile breakdown (FULL TEMPLATE) ---")
@@ -821,7 +888,11 @@ def section_prof(backends, ctx, iterations):
         )
 
 
-def run(item_count=50, iterations=200, sections=("render", "compile", "scaling")):
+def run(
+    item_count=50,
+    iterations=200,
+    sections=("render", "compile", "scaling", "context"),
+):
     backends = _build_backends()
     if "render" in sections:
         section_render(backends, item_count, iterations)
@@ -830,6 +901,8 @@ def run(item_count=50, iterations=200, sections=("render", "compile", "scaling")
         section_compile(backends, max(20, iterations // 5))
     if "scaling" in sections:
         section_scaling(backends, iterations)
+    if "context" in sections:
+        section_context_entry(backends, item_count, iterations)
     apps = _build_applications(item_count)
     section_prof(backends, {"applications": apps}, iterations)
 
@@ -837,6 +910,6 @@ def run(item_count=50, iterations=200, sections=("render", "compile", "scaling")
 if __name__ == "__main__":
     n_items = int(os.environ.get("BENCH_ITEMS", "50"))
     n_iters = int(os.environ.get("BENCH_ITERS", "200"))
-    sections_env = os.environ.get("BENCH_SECTIONS", "render,compile,scaling")
+    sections_env = os.environ.get("BENCH_SECTIONS", "render,compile,scaling,context")
     sections = tuple(s.strip() for s in sections_env.split(",") if s.strip())
     run(item_count=n_items, iterations=n_iters, sections=sections)
