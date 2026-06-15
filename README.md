@@ -82,7 +82,7 @@ scaling sweep) lives in `benches/bench.py`.
 | NESTED LOOP (apps×tags) | 0.061ms  | 0.123ms     | 0.784ms   |
 | URL TAG                 | 0.455ms  | 0.543ms     | 0.722ms   |
 | INCLUDE LOOP            | 0.042ms  | unsupported | 0.457ms   |
-| INHERITANCE             | 0.071ms  | unsupported | 0.344ms   |
+| INHERITANCE             | 0.037ms  | unsupported | 0.344ms   |
 | Compile SMALL (10 rows) | 0.158ms  | 0.189ms     | 0.915ms   |
 | Compile MEDIUM (100)    | 1.38ms   | 14.29ms     | 9.52ms    |
 | Compile LARGE (500)     | 6.93ms   | 349.05ms    | 49.38ms   |

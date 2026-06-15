@@ -846,7 +846,27 @@ fn load_template_with_history(
         .append(&origin)
         .map_err(|e| TemplateError::Internal(format!("Failed to append to history: {e}")))?;
 
-    // Get template source and compile
+    let (base_name, partial_name) = match template_name.split_once('#') {
+        Some((base, partial)) => (base, Some(partial)),
+        None => (template_name, None),
+    };
+
+    let cache_key = if partial_name.is_none() {
+        origin
+            .getattr("name")
+            .ok()
+            .and_then(|n| n.extract::<String>().ok())
+            .map(|o| format!("extends://{o}"))
+    } else {
+        None
+    };
+
+    if let Some(ref key) = cache_key
+        && let Some(nl) = TEMPLATE_CACHE.with_borrow(|c| c.get(key).cloned())
+    {
+        return Ok(nl);
+    }
+
     let source: String = django_template
         .getattr("source")
         .and_then(|s| s.extract())
@@ -857,11 +877,6 @@ fn load_template_with_history(
             ))
         })?;
 
-    let (base_name, partial_name) = match template_name.split_once('#') {
-        Some((base, partial)) => (base, Some(partial)),
-        None => (template_name, None),
-    };
-
     let engine_bound2 = engine_py.bind(py);
     let nodelist = Template::compile_nodelist_with_engine(
         &source,
@@ -870,15 +885,25 @@ fn load_template_with_history(
         Some(engine_bound2),
     )?;
 
-    if let Some(pname) = partial_name {
-        extract_partial_arc(&nodelist, pname).ok_or_else(|| TemplateError::TemplateDoesNotExist {
-            msg: template_name.to_owned(),
-            tried: vec![],
-            chain: vec![],
-        })
+    let rc = if let Some(pname) = partial_name {
+        extract_partial_arc(&nodelist, pname).ok_or_else(|| {
+            TemplateError::TemplateDoesNotExist {
+                msg: template_name.to_owned(),
+                tried: vec![],
+                chain: vec![],
+            }
+        })?
     } else {
-        Ok(Arc::new(nodelist))
+        Arc::new(nodelist)
+    };
+
+    if let Some(key) = cache_key {
+        TEMPLATE_CACHE.with_borrow_mut(|c| {
+            c.insert(key, Arc::clone(&rc));
+        });
     }
+
+    Ok(rc)
 }
 
 static INCLUDE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

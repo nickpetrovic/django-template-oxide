@@ -34,8 +34,8 @@ Numbers from `benches/bench.py`. Smaller is better.
 | REGROUP (by status)            | 0.121ms  | unsupported            | 0.579ms   |
 | FILTER VAR ARG (default:var)   | 0.025ms  | 0.059ms                | 0.165ms   |
 | INCLUDE LOOP (50 includes)     | 0.042ms  | unsupported            | 0.457ms   |
-| INHERITANCE (extends + blocks) | 0.071ms  | unsupported            | 0.344ms   |
-| INHERITANCE 3-LEVEL (block.super)| 0.191ms| unsupported            | 0.395ms   |
+| INHERITANCE (extends + blocks) | 0.037ms  | unsupported            | 0.344ms   |
+| INHERITANCE 3-LEVEL (block.super)| 0.113ms| unsupported            | 0.395ms   |
 
 ## Compile time
 

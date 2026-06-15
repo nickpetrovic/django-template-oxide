@@ -38,8 +38,8 @@ Until the first tagged release, everything lives under `Unreleased`.
   backend path, plus 1514 vendored Django `template_tests` routed
   through the oxide backend (1513 pass, 1 skipped, 0 failures).
 - Benchmark suite (`benches/bench.py`) comparing oxide against stock
-  Django and `django-rusty-templates` across 22 render workloads, 3
-  compile sizes, and a scaling sweep.
+  Django and `django-rusty-templates` across 30 render workloads, 3
+  compile sizes, a scaling sweep, and a context-entry section.
 
 ### Performance
 
@@ -50,3 +50,6 @@ on an M-series laptop. See `benches/README.md` for methodology.
 - Compile time scales linearly while rusty grows superlinearly:
   oxide 6.9ms vs rusty 349ms on a 500-row template.
 - Render path is 5x-40x faster than stock Django on typical workloads.
+- `{% extends %}` caches compiled parent templates across renders
+  instead of re-parsing them each time, roughly halving inheritance
+  render time (2-level INHERITANCE 0.071ms -> 0.037ms).

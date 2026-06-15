@@ -35,7 +35,7 @@ Behavioral compliance verified against Django's own
 | TEXT ONLY               | 0.005ms  | 0.011ms                | 0.019ms      |
 | VARS ONLY (3 attrs)     | 0.019ms  | 0.159ms                | 0.296ms      |
 | FULL TEMPLATE           | 0.104ms  | 0.836ms                | 1.513ms      |
-| INHERITANCE             | 0.071ms  | unsupported            | 0.344ms      |
+| INHERITANCE             | 0.037ms  | unsupported            | 0.344ms      |
 | Compile LARGE (500 rows)| 6.93ms   | 349.05ms               | 49.38ms      |
 
 See [Performance](performance.md) for the full benchmark and how to
