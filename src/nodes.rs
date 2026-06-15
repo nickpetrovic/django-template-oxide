@@ -1316,8 +1316,7 @@ fn is_primitive_or_collection(obj: &Bound<'_, pyo3::PyAny>) -> bool {
         || obj.is_exact_instance_of::<PyBool>()
 }
 
-type FastHashMap<K, V> =
-    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<crate::context::FastHasher>>;
+type FastHashMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::FixedState>;
 
 thread_local! {
     /// Per-type cache of `__getitem__` and callable bits. Holds a
