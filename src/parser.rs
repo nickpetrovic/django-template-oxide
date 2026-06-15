@@ -152,16 +152,20 @@ impl Parser {
 
                     // Resolve each filter's Python callable; placeholder
                     // `None` for native-only filters (renderer detects).
-                    let filter_funcs: Vec<Py<PyAny>> = pyo3::Python::attach(|py| {
-                        filter_expression
-                            .filters
-                            .iter()
-                            .map(|pf| match self.filters.get(&pf.name) {
-                                Some(f) => f.clone_ref(py),
-                                None => py.None(),
-                            })
-                            .collect()
-                    });
+                    let filter_funcs: Vec<Py<PyAny>> = if filter_expression.filters.is_empty() {
+                        Vec::new()
+                    } else {
+                        pyo3::Python::attach(|py| {
+                            filter_expression
+                                .filters
+                                .iter()
+                                .map(|pf| match self.filters.get(&pf.name) {
+                                    Some(f) => f.clone_ref(py),
+                                    None => py.None(),
+                                })
+                                .collect()
+                        })
+                    };
 
                     let mut node =
                         Box::new(VariableNode::with_filters(filter_expression, filter_funcs));

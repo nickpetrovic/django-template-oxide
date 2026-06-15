@@ -610,7 +610,8 @@ impl FilterExpression {
         let mut filters: Vec<ParsedFilter> = Vec::new();
         let mut upto: usize = 0;
 
-        for mat in FILTER_RE.find_iter(token) {
+        for caps in FILTER_RE.captures_iter(token) {
+            let mat = caps.get(0).expect("capture group 0 always present");
             let start = mat.start();
             if upto != start {
                 return Err(TemplateError::TemplateSyntaxError(format!(
@@ -620,10 +621,6 @@ impl FilterExpression {
                     &token[start..],
                 )));
             }
-
-            let caps = FILTER_RE
-                .captures(&token[start..])
-                .expect("regex matched but captures failed");
 
             if var_obj.is_none() {
                 // First match: variable or constant.
@@ -716,7 +713,7 @@ impl FilterExpression {
                 filters.push(parsed);
             }
 
-            upto = start + mat.len();
+            upto = mat.end();
         }
 
         if upto != token.len() {
