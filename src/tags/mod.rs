@@ -1134,7 +1134,9 @@ fn load_python_library<'py>(
         .map_err(|e| TemplateError::Internal(format!("Cannot get import_library: {e}")))?;
 
     let dotted_path = format!("django.templatetags.{}", name);
-    if let Ok(lib) = import_library.call1((dotted_path.as_str(),)) { return Ok(lib) }
+    if let Ok(lib) = import_library.call1((dotted_path.as_str(),)) {
+        return Ok(lib);
+    }
 
     match import_library.call1((name,)) {
         Ok(lib) => Ok(lib),
@@ -1933,9 +1935,10 @@ pub fn register_default_tags(parser: &mut Parser) {
     ];
 
     for (name, func) in tags {
-        parser
-            .tags
-            .insert(name.to_owned(), TagCompileFunc::Rust(std::rc::Rc::new(func)));
+        parser.tags.insert(
+            name.to_owned(),
+            TagCompileFunc::Rust(std::rc::Rc::new(func)),
+        );
     }
 
     i18n_tags::register_i18n_tags(parser);

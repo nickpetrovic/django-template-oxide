@@ -51,32 +51,33 @@ impl Node for TranslateNode {
                 // Constants resolved at parse time; translate then
                 // re-apply filters.
                 if !self.noop
-                    && let Some(msg) = constant.clone() {
-                        let translation = py.import("django.utils.translation").map_err(|e| {
-                            TemplateError::Internal(format!("Cannot import translation: {e}"))
-                        })?;
+                    && let Some(msg) = constant.clone()
+                {
+                    let translation = py.import("django.utils.translation").map_err(|e| {
+                        TemplateError::Internal(format!("Cannot import translation: {e}"))
+                    })?;
 
-                        // Django doubles percent signs before calling gettext
-                        // because PO files store msgids with %% for literal %.
-                        // See Variable.resolve: `msgid = value.replace("%", "%%")`
-                        let msgid = msg.replace('%', "%%");
+                    // Django doubles percent signs before calling gettext
+                    // because PO files store msgids with %% for literal %.
+                    // See Variable.resolve: `msgid = value.replace("%", "%%")`
+                    let msgid = msg.replace('%', "%%");
 
-                        let translated = if let Some(ctx_expr) = &self.message_context {
-                            let ctx_val = resolve_expr(py, ctx_expr, context);
-                            let ctx_str = ctx_val.to_string();
-                            translation
-                                .call_method1("pgettext", (ctx_str.as_str(), msgid.as_str()))
-                                .and_then(|r| r.extract::<String>())
-                                .unwrap_or_else(|_| msg.clone())
-                        } else {
-                            translation
-                                .call_method1("gettext", (msgid.as_str(),))
-                                .and_then(|r| r.extract::<String>())
-                                .unwrap_or_else(|_| msg.clone())
-                        };
+                    let translated = if let Some(ctx_expr) = &self.message_context {
+                        let ctx_val = resolve_expr(py, ctx_expr, context);
+                        let ctx_str = ctx_val.to_string();
+                        translation
+                            .call_method1("pgettext", (ctx_str.as_str(), msgid.as_str()))
+                            .and_then(|r| r.extract::<String>())
+                            .unwrap_or_else(|_| msg.clone())
+                    } else {
+                        translation
+                            .call_method1("gettext", (msgid.as_str(),))
+                            .and_then(|r| r.extract::<String>())
+                            .unwrap_or_else(|_| msg.clone())
+                    };
 
-                        fe.var = crate::variable::FilterExpressionVar::Constant(Some(translated));
-                    }
+                    fe.var = crate::variable::FilterExpressionVar::Constant(Some(translated));
+                }
             }
         }
 
@@ -89,10 +90,12 @@ impl Node for TranslateNode {
             self.message.var,
             crate::variable::FilterExpressionVar::Constant(_)
         );
-        if !self.noop && was_constant
-            && let Value::SafeString(s) = output {
-                output = Value::String(s.to_string());
-            }
+        if !self.noop
+            && was_constant
+            && let Value::SafeString(s) = output
+        {
+            output = Value::String(s.to_string());
+        }
 
         let mut value = crate::nodes::render_value_in_context(&output, context);
 
@@ -202,32 +205,34 @@ impl Node for BlockTranslateNode {
         }
 
         if let Some(ref countervar) = self.countervar
-            && let Some(ref counter_expr) = self.counter {
-                let count_val = resolve_expr(py, counter_expr, context);
-                extra_values.insert(countervar.clone(), count_val);
-            }
+            && let Some(ref counter_expr) = self.counter
+        {
+            let count_val = resolve_expr(py, counter_expr, context);
+            extra_values.insert(countervar.clone(), count_val);
+        }
 
         context.push_with(extra_values);
 
         // Counter must be numeric (Django raises TemplateSyntaxError).
         if let Some(ref countervar) = self.countervar
-            && let Some(val) = context.get(countervar) {
-                match val {
-                    Value::Int(_) | Value::Float(_) => {}
-                    _ => {
-                        context.pop();
-                        let tag_name = self
-                            .token_field
-                            .as_ref()
-                            .and_then(|t| t.contents.split_whitespace().next())
-                            .unwrap_or("blocktranslate");
-                        return Err(TemplateError::TemplateSyntaxError(format!(
-                            "'{}' argument to '{}' tag must be a number.",
-                            countervar, tag_name,
-                        )));
-                    }
+            && let Some(val) = context.get(countervar)
+        {
+            match val {
+                Value::Int(_) | Value::Float(_) => {}
+                _ => {
+                    context.pop();
+                    let tag_name = self
+                        .token_field
+                        .as_ref()
+                        .and_then(|t| t.contents.split_whitespace().next())
+                        .unwrap_or("blocktranslate");
+                    return Err(TemplateError::TemplateSyntaxError(format!(
+                        "'{}' argument to '{}' tag must be a number.",
+                        countervar, tag_name,
+                    )));
                 }
             }
+        }
 
         // Build msgid with `%(name)s` placeholders, matching Django's
         // BlockTranslateNode.render_token_list.
@@ -364,12 +369,13 @@ fn render_token_list(nodelist: &NodeList) -> (String, Vec<String>) {
             NodeEntry::Boxed(node) => {
                 // Boxed VariableNodes possible via push() (not push_variable).
                 if let Some(var_node) = node.as_variable_node()
-                    && let Some(token) = var_node.token() {
-                        let var_name = token.contents.trim().to_owned();
-                        result.push_str(&format!("%({})", var_name));
-                        result.push('s');
-                        vars.push(var_name);
-                    }
+                    && let Some(token) = var_node.token()
+                {
+                    let var_name = token.contents.trim().to_owned();
+                    result.push_str(&format!("%({})", var_name));
+                    result.push('s');
+                    vars.push(var_name);
+                }
             }
         }
     }
@@ -401,9 +407,10 @@ fn interpolate_message_with_data(
                     chars.next();
                 }
                 if let Some(&c) = chars.peek()
-                    && (c == 's' || c == 'd' || c == 'r') {
-                        chars.next();
-                    }
+                    && (c == 's' || c == 'd' || c == 'r')
+                {
+                    chars.next();
+                }
                 if let Some(val) = data.get(&name) {
                     result.push_str(val);
                 } else if let Some(val) = context.get(&name) {

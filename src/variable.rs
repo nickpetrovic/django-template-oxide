@@ -250,7 +250,8 @@ impl Variable {
                             {
                                 return Err(PyTypeError::new_err("skip"));
                             }
-                            current.getattr(bit_py.clone())})(
+                            current.getattr(bit_py.clone())
+                        })(
                         );
 
                         match attr_result {
@@ -485,9 +486,10 @@ fn dir_contains(dir_list: &Bound<'_, PyAny>, name: &str) -> bool {
     if let Ok(list) = dir_list.cast::<PyList>() {
         for item in list.iter() {
             if let Ok(s) = item.extract::<String>()
-                && s == name {
-                    return true;
-                }
+                && s == name
+            {
+                return true;
+            }
         }
     }
     false

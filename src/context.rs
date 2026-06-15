@@ -236,13 +236,15 @@ impl<'py> From<&Bound<'py, PyAny>> for Value {
             return Value::Bool(obj.extract::<bool>().unwrap_or(false));
         }
         if obj.is_exact_instance_of::<PyInt>()
-            && let Ok(v) = obj.extract::<i64>() {
-                return Value::Int(v);
-            }
+            && let Ok(v) = obj.extract::<i64>()
+        {
+            return Value::Int(v);
+        }
         if obj.is_exact_instance_of::<PyFloat>()
-            && let Ok(v) = obj.extract::<f64>() {
-                return Value::Float(v);
-            }
+            && let Ok(v) = obj.extract::<f64>()
+        {
+            return Value::Float(v);
+        }
         if obj.is_exact_instance_of::<PyString>() {
             // Exact `str` can't be SafeString (a subclass); skip __html__.
             if let Ok(v) = obj.extract::<String>() {
@@ -262,24 +264,27 @@ impl<'py> From<&Bound<'py, PyAny>> for Value {
         let is_safe = obj.getattr("__html__").is_ok();
 
         if let Ok(s) = obj.cast::<PyString>()
-            && let Ok(v) = s.extract::<String>() {
-                if is_safe {
-                    return Value::SafeString(std::sync::Arc::from(v));
-                }
-                return Value::String(v);
+            && let Ok(v) = s.extract::<String>()
+        {
+            if is_safe {
+                return Value::SafeString(std::sync::Arc::from(v));
             }
+            return Value::String(v);
+        }
 
         if let Ok(b) = obj.cast::<PyBool>() {
             return Value::Bool(b.is_true());
         }
         if let Ok(i) = obj.cast::<PyInt>()
-            && let Ok(v) = i.extract::<i64>() {
-                return Value::Int(v);
-            }
+            && let Ok(v) = i.extract::<i64>()
+        {
+            return Value::Int(v);
+        }
         if let Ok(f) = obj.cast::<PyFloat>()
-            && let Ok(v) = f.extract::<f64>() {
-                return Value::Float(v);
-            }
+            && let Ok(v) = f.extract::<f64>()
+        {
+            return Value::Float(v);
+        }
 
         // Dict/list/tuple subclasses stay lazy.
         if obj.is_instance_of::<PyList>()
@@ -299,15 +304,16 @@ impl<'py> From<&Bound<'py, PyAny>> for Value {
 
         if is_promise
             && let Ok(s) = obj.str()
-                && let Ok(v) = s.extract::<String>() {
-                    // Re-check __html__ on the resolved string (gettext_lazy
-                    // may wrap SafeData transparently).
-                    let resolved_safe = is_safe || s.as_any().getattr("__html__").is_ok();
-                    if resolved_safe {
-                        return Value::SafeString(std::sync::Arc::from(v));
-                    }
-                    return Value::String(v);
-                }
+            && let Ok(v) = s.extract::<String>()
+        {
+            // Re-check __html__ on the resolved string (gettext_lazy
+            // may wrap SafeData transparently).
+            let resolved_safe = is_safe || s.as_any().getattr("__html__").is_ok();
+            if resolved_safe {
+                return Value::SafeString(std::sync::Arc::from(v));
+            }
+            return Value::String(v);
+        }
 
         Value::PyObject(obj.clone().unbind())
     }
@@ -328,9 +334,10 @@ impl Value {
                 if let Ok(mark_safe) = py
                     .import("django.utils.safestring")
                     .and_then(|m| m.getattr("mark_safe"))
-                    && let Ok(result) = mark_safe.call1((as_str,)) {
-                        return result.unbind();
-                    }
+                    && let Ok(result) = mark_safe.call1((as_str,))
+                {
+                    return result.unbind();
+                }
                 as_str.into_pyobject(py).unwrap().into_any().unbind()
             }
             Value::List(items) => {

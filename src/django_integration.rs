@@ -31,9 +31,9 @@ pub fn render_nodelist(
     // 32B/node is a conservative average; buffer doubles on overflow.
     let mut out = String::with_capacity(len.saturating_mul(32));
 
-    let text_node_type = text_node_cls.cast::<PyType>().map_err(|_| {
-        PyRuntimeError::new_err("render_nodelist: text_node_cls must be a type")
-    })?;
+    let text_node_type = text_node_cls
+        .cast::<PyType>()
+        .map_err(|_| PyRuntimeError::new_err("render_nodelist: text_node_cls must be a type"))?;
 
     let s_attr = intern!(py, "s");
     let render_annotated = intern!(py, "render_annotated");

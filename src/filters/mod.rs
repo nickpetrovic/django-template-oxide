@@ -100,9 +100,7 @@ fn arg_as_string(args: &[Value], default: &str) -> String {
 
 /// Get the first filter argument as an i64, or return a default.
 fn arg_as_i64(args: &[Value], default: i64) -> i64 {
-    args.first()
-        .and_then(coerce_to_i64)
-        .unwrap_or(default)
+    args.first().and_then(coerce_to_i64).unwrap_or(default)
 }
 
 /// Try to coerce a `Value` to i64.
@@ -771,9 +769,7 @@ fn filter_join(value: &Value, args: &[Value], autoescape: bool) -> Value {
         // Django joins any iterable; iterating a str yields its plain
         // (escapable) chars.
         Value::String(s) => Some(s.chars().map(|c| Value::String(c.to_string())).collect()),
-        Value::SafeString(s) => {
-            Some(s.chars().map(|c| Value::String(c.to_string())).collect())
-        }
+        Value::SafeString(s) => Some(s.chars().map(|c| Value::String(c.to_string())).collect()),
         Value::PyObject(obj) => Python::attach(|py| {
             let bound = obj.bind(py);
             if let Ok(iter) = bound.try_iter() {
@@ -1022,14 +1018,15 @@ fn filter_unordered_list(value: &Value, _args: &[Value], autoescape: bool) -> Va
                 };
 
                 if i + 1 < items.len()
-                    && let Some(sub) = as_sublist(&items[i + 1]) {
-                        let child = render_items(&sub, indent + 1, autoescape);
-                        lines.push(format!(
-                            "{tabs}<li>{s}\n{tabs}<ul>\n{child}\n{tabs}</ul>\n{tabs}</li>"
-                        ));
-                        i += 2;
-                        continue;
-                    }
+                    && let Some(sub) = as_sublist(&items[i + 1])
+                {
+                    let child = render_items(&sub, indent + 1, autoescape);
+                    lines.push(format!(
+                        "{tabs}<li>{s}\n{tabs}<ul>\n{child}\n{tabs}</ul>\n{tabs}</li>"
+                    ));
+                    i += 2;
+                    continue;
+                }
 
                 lines.push(format!("{tabs}<li>{s}</li>"));
                 i += 1;
@@ -1361,9 +1358,10 @@ fn cached_django_callable(
     let key = (module_path.as_ptr() as usize, func_name.as_ptr() as usize);
 
     if let Ok(guard) = CACHE.lock()
-        && let Some(f) = guard.get(&key) {
-            return Some(f.clone_ref(py));
-        }
+        && let Some(f) = guard.get(&key)
+    {
+        return Some(f.clone_ref(py));
+    }
 
     let module = py.import(module_path).ok()?;
     let func = module.getattr(func_name).ok()?;
@@ -1382,9 +1380,10 @@ fn filter_date(value: &Value, args: &[Value], _autoescape: bool) -> Value {
         return Value::SafeString(String::new().into());
     }
     if let Some(s) = value.as_str()
-        && s.is_empty() {
-            return Value::SafeString(String::new().into());
-        }
+        && s.is_empty()
+    {
+        return Value::SafeString(String::new().into());
+    }
 
     Python::attach(|py| {
         // No-arg form needs DATE_FORMAT from settings; defer to Django.

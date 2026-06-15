@@ -879,11 +879,12 @@ impl PyTemplate {
         // Propagate context mutations back to the original PyContext
         // so tags like {% firstof ... as var %} are visible to callers.
         if let Some(obj) = context
-            && let Ok(pyctx) = obj.cast::<PyContext>() {
-                let mut borrowed = pyctx.borrow_mut();
-                // Copy the entire base context back (including new keys)
-                borrowed.inner.base = rust_context.base;
-            }
+            && let Ok(pyctx) = obj.cast::<PyContext>()
+        {
+            let mut borrowed = pyctx.borrow_mut();
+            // Copy the entire base context back (including new keys)
+            borrowed.inner.base = rust_context.base;
+        }
 
         result.map_err(|e| -> PyErr { e.into() })
     }
@@ -901,9 +902,10 @@ impl PyTemplate {
         let list = pyo3::types::PyList::empty(py);
         for entry in self.inner.nodelist.iter_entries() {
             if let crate::nodes::NodeEntry::Boxed(boxed) = entry
-                && let Some(py_node) = boxed.as_py_node() {
-                    list.append(py_node.clone_ref(py))?;
-                }
+                && let Some(py_node) = boxed.as_py_node()
+            {
+                list.append(py_node.clone_ref(py))?;
+            }
         }
         Ok(list.unbind())
     }
@@ -1141,10 +1143,9 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Value {
 
     let mut val = Value::from(obj);
 
-    if is_safe
-        && let Value::String(s) = val {
-            val = Value::SafeString(s.into());
-        }
+    if is_safe && let Value::String(s) = val {
+        val = Value::SafeString(s.into());
+    }
 
     val
 }
@@ -1184,11 +1185,12 @@ pub fn register_default_filters(py: Python<'_>, parser: &mut crate::parser::Pars
     for (name, native_filter) in native_filters {
         if PYTHON_DELEGATED_FILTERS.contains(&name.as_str())
             && let Some(ref df_module) = django_filters
-                && let Ok(py_filter) = df_module.getattr(name.as_str()) {
-                    parser.filters.insert(name.clone(), py_filter.unbind());
-                    continue;
-                }
-            // Django not available: fall through to the Rust stub.
+            && let Ok(py_filter) = df_module.getattr(name.as_str())
+        {
+            parser.filters.insert(name.clone(), py_filter.unbind());
+            continue;
+        }
+        // Django not available: fall through to the Rust stub.
 
         let wrapper = NativeFilterWrapper {
             name: name.clone(),

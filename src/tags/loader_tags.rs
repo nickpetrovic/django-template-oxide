@@ -178,9 +178,10 @@ fn extract_partial_arc(nodelist: &NodeList, name: &str) -> Option<Arc<NodeList>>
             }
             for child_name in node.child_nodelists() {
                 if let Some(child_nl) = node.get_child_nodelist(child_name)
-                    && let Some(found) = extract_partial_arc(child_nl, name) {
-                        return Some(found);
-                    }
+                    && let Some(found) = extract_partial_arc(child_nl, name)
+                {
+                    return Some(found);
+                }
             }
         }
     }
@@ -1439,9 +1440,10 @@ fn nodelist_uses_block_super(nodelist: &NodeList) -> bool {
     for entry in nodelist.iter_entries() {
         if let crate::nodes::NodeEntry::Variable(var_node) = entry
             && let Some(token) = var_node.token()
-                && token.contents.contains("block.super") {
-                    return true;
-                }
+            && token.contents.contains("block.super")
+        {
+            return true;
+        }
     }
     false
 }

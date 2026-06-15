@@ -109,23 +109,25 @@ impl Template {
             // each so `{% cotton %}` etc. are visible during parsing.
             if let Some(engine_obj) = engine {
                 if let Ok(builtins) = engine_obj.getattr(pyo3::intern!(py, "template_builtins"))
-                    && let Ok(iter) = builtins.try_iter() {
-                        for lib in iter.flatten() {
-                            // Best-effort: skip libraries that raise.
-                            let _ = parser.add_python_library(py, &lib);
-                        }
+                    && let Ok(iter) = builtins.try_iter()
+                {
+                    for lib in iter.flatten() {
+                        // Best-effort: skip libraries that raise.
+                        let _ = parser.add_python_library(py, &lib);
                     }
+                }
 
                 // template_libraries: alias -> Library for {% load name %}
                 // resolution (the standard stock Django path).
                 if let Ok(libs) = engine_obj.getattr(pyo3::intern!(py, "template_libraries"))
-                    && let Ok(libs_dict) = libs.cast::<pyo3::types::PyDict>() {
-                        for (name, lib) in libs_dict.iter() {
-                            if let Ok(name_str) = name.extract::<String>() {
-                                parser.libraries.insert(name_str, lib.unbind());
-                            }
+                    && let Ok(libs_dict) = libs.cast::<pyo3::types::PyDict>()
+                {
+                    for (name, lib) in libs_dict.iter() {
+                        if let Ok(name_str) = name.extract::<String>() {
+                            parser.libraries.insert(name_str, lib.unbind());
                         }
                     }
+                }
             }
 
             Ok(())

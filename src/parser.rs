@@ -11,8 +11,7 @@ use crate::lexer::{Token, TokenType};
 use crate::nodes::{Node, NodeList, Origin, TextNode, VariableNode};
 use crate::variable::{FilterExpression, ParsedFilter};
 
-pub type RustTagCompileFn =
-    Rc<dyn Fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>>;
+pub type RustTagCompileFn = Rc<dyn Fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>>;
 
 /// Plain fn-pointer form used by the built-in tag registration tables.
 pub type TagCompileFn = fn(&mut Parser, &Token) -> Result<Box<dyn Node>, TemplateError>;

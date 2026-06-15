@@ -347,13 +347,14 @@ impl PyNodeList {
             // Recurse via the Python node's own get_nodes_by_type if exposed.
             if let Ok(get_nodes) = node_obj.bind(py).getattr(intern!(py, "get_nodes_by_type"))
                 && let Ok(children) = get_nodes.call1((nodetype,))
-                    && let Ok(children_list) = children.cast::<pyo3::types::PyList>() {
-                        for child in children_list.iter() {
-                            if !child.is(&node_obj) {
-                                result.append(child)?;
-                            }
-                        }
+                && let Ok(children_list) = children.cast::<pyo3::types::PyList>()
+            {
+                for child in children_list.iter() {
+                    if !child.is(&node_obj) {
+                        result.append(child)?;
                     }
+                }
+            }
         }
         Ok(result.unbind())
     }

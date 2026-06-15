@@ -94,9 +94,10 @@ impl BodyProgram {
                     col.filter_id
                         .dispatch(&input, args_slice, ae, Some(col.native_fn));
                 if col.is_safe_filter
-                    && let Value::String(s) = result {
-                        result = Value::SafeString(Arc::from(s));
-                    }
+                    && let Value::String(s) = result
+                {
+                    result = Value::SafeString(Arc::from(s));
+                }
                 col_values.push(result);
             }
             out.push(col_values);
@@ -414,9 +415,10 @@ fn compile_if(builder: &mut ProgramBuilder, if_node: &crate::tags::IfNode, loopv
         None => return false,
     };
     if let Some(eb) = else_branch
-        && eb.condition().is_some() {
-            return false;
-        }
+        && eb.condition().is_some()
+    {
+        return false;
+    }
 
     let slot = match cond.single_var_batch_slot(loopvar) {
         Some(s) => s,

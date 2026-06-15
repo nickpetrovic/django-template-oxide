@@ -206,26 +206,29 @@ fn visit_filter_expression(
     use crate::variable::FilterExpressionVar;
 
     if let FilterExpressionVar::Var(variable) = &fe.var
-        && let Some(parts) = variable.lookups() {
-            // `loopvar.path` only; raw loopvar is already in context.
-            if parts.len() >= 2 && parts[0] == loopvar
-                && let Some(rest) = variable.lookup_rest() {
-                    let slot = match path_to_slot.get(rest) {
-                        Some(&existing) => existing,
-                        None => {
-                            if paths.len() >= u16::MAX as usize {
-                                return;
-                            }
-                            let new_slot = paths.len() as u16;
-                            paths.push(rest.to_owned());
-                            path_to_slot.insert(rest.to_owned(), new_slot);
-                            new_slot
-                        }
-                    };
-                    // Stamp the slot so render skips the HashMap probe.
-                    variable.set_batch_slot(slot);
+        && let Some(parts) = variable.lookups()
+    {
+        // `loopvar.path` only; raw loopvar is already in context.
+        if parts.len() >= 2
+            && parts[0] == loopvar
+            && let Some(rest) = variable.lookup_rest()
+        {
+            let slot = match path_to_slot.get(rest) {
+                Some(&existing) => existing,
+                None => {
+                    if paths.len() >= u16::MAX as usize {
+                        return;
+                    }
+                    let new_slot = paths.len() as u16;
+                    paths.push(rest.to_owned());
+                    path_to_slot.insert(rest.to_owned(), new_slot);
+                    new_slot
                 }
+            };
+            // Stamp the slot so render skips the HashMap probe.
+            variable.set_batch_slot(slot);
         }
+    }
 
     // Filter args may also be variable refs; recurse so e.g.
     // `{{ x|default:app.fallback }}` picks up `fallback`.
@@ -233,23 +236,25 @@ fn visit_filter_expression(
         for arg in &parsed_filter.args {
             if arg.is_lookup
                 && let Some(var) = &arg.variable
-                    && let Some(parts) = var.lookups()
-                        && parts.len() >= 2 && parts[0] == loopvar
-                            && let Some(rest) = var.lookup_rest() {
-                                let slot = match path_to_slot.get(rest) {
-                                    Some(&existing) => existing,
-                                    None => {
-                                        if paths.len() >= u16::MAX as usize {
-                                            return;
-                                        }
-                                        let new_slot = paths.len() as u16;
-                                        paths.push(rest.to_owned());
-                                        path_to_slot.insert(rest.to_owned(), new_slot);
-                                        new_slot
-                                    }
-                                };
-                                var.set_batch_slot(slot);
-                            }
+                && let Some(parts) = var.lookups()
+                && parts.len() >= 2
+                && parts[0] == loopvar
+                && let Some(rest) = var.lookup_rest()
+            {
+                let slot = match path_to_slot.get(rest) {
+                    Some(&existing) => existing,
+                    None => {
+                        if paths.len() >= u16::MAX as usize {
+                            return;
+                        }
+                        let new_slot = paths.len() as u16;
+                        paths.push(rest.to_owned());
+                        path_to_slot.insert(rest.to_owned(), new_slot);
+                        new_slot
+                    }
+                };
+                var.set_batch_slot(slot);
+            }
         }
     }
 }
@@ -284,9 +289,10 @@ impl ForNode {
         let seq_value = resolve_if_value(py, &self.sequence, context);
 
         if let Some(ref empty_nodelist) = self.nodelist_empty
-            && sequence_known_empty(py, &seq_value) {
-                return empty_nodelist.render_into(py, context, out);
-            }
+            && sequence_known_empty(py, &seq_value)
+        {
+            return empty_nodelist.render_into(py, context, out);
+        }
 
         let items: Vec<Value> = match &seq_value {
             Value::List(items) => {
@@ -412,14 +418,14 @@ impl ForNode {
             pre_extracted.as_ref(),
             self.batch_plan.as_ref(),
             single_loopvar.as_ref(),
-        )
-            && !pre.is_empty() {
-                context.loop_batch_cache = Some(crate::context::LoopBatchCache {
-                    loopvar: name.clone(),
-                    path_to_slot: std::sync::Arc::clone(plan.path_to_slot()),
-                    current_tuple: pre[0].clone_ref(py),
-                });
-            }
+        ) && !pre.is_empty()
+        {
+            context.loop_batch_cache = Some(crate::context::LoopBatchCache {
+                loopvar: name.clone(),
+                path_to_slot: std::sync::Arc::clone(plan.path_to_slot()),
+                current_tuple: pre[0].clone_ref(py),
+            });
+        }
 
         // Pre-compute filtered columns: each `{{ x|filter:"arg" }}` in
         // the body applies once per row in a tight Rust loop. Empty
@@ -435,33 +441,35 @@ impl ForNode {
                 }
             });
             if let Some(program) = program_slot.as_ref()
-                && program.has_columns() {
-                    pre_columns = program.precompute_columns(py, pre, context.autoescape);
-                }
+                && program.has_columns()
+            {
+                pre_columns = program.precompute_columns(py, pre, context.autoescape);
+            }
         }
 
         for (i, item) in items.into_iter().enumerate() {
             if self.body_uses_forloop
-                && let Some(Value::Dict(forloop)) = context.get_in_topmost_mut("forloop") {
-                    if let Some((_, v)) = forloop.get_index_mut(0) {
-                        *v = Value::Int((i + 1) as i64);
-                    }
-                    if let Some((_, v)) = forloop.get_index_mut(1) {
-                        *v = Value::Int(i as i64);
-                    }
-                    if let Some((_, v)) = forloop.get_index_mut(2) {
-                        *v = Value::Int((len - i) as i64);
-                    }
-                    if let Some((_, v)) = forloop.get_index_mut(3) {
-                        *v = Value::Int((len - i - 1) as i64);
-                    }
-                    if let Some((_, v)) = forloop.get_index_mut(4) {
-                        *v = Value::Bool(i == 0);
-                    }
-                    if let Some((_, v)) = forloop.get_index_mut(5) {
-                        *v = Value::Bool(i == len - 1);
-                    }
+                && let Some(Value::Dict(forloop)) = context.get_in_topmost_mut("forloop")
+            {
+                if let Some((_, v)) = forloop.get_index_mut(0) {
+                    *v = Value::Int((i + 1) as i64);
                 }
+                if let Some((_, v)) = forloop.get_index_mut(1) {
+                    *v = Value::Int(i as i64);
+                }
+                if let Some((_, v)) = forloop.get_index_mut(2) {
+                    *v = Value::Int((len - i) as i64);
+                }
+                if let Some((_, v)) = forloop.get_index_mut(3) {
+                    *v = Value::Int((len - i - 1) as i64);
+                }
+                if let Some((_, v)) = forloop.get_index_mut(4) {
+                    *v = Value::Bool(i == 0);
+                }
+                if let Some((_, v)) = forloop.get_index_mut(5) {
+                    *v = Value::Bool(i == len - 1);
+                }
+            }
 
             if let Some(ref name) = single_loopvar {
                 // Update only `current_tuple`; loopvar/path_to_slot
@@ -469,9 +477,9 @@ impl ForNode {
                 if let Some(pre) = pre_extracted.as_ref()
                     && let (Some(tuple), Some(cache)) =
                         (pre.get(i), context.loop_batch_cache.as_mut())
-                    {
-                        cache.current_tuple = tuple.clone_ref(py);
-                    }
+                {
+                    cache.current_tuple = tuple.clone_ref(py);
+                }
                 context.set(name.clone(), item);
             } else {
                 // Tuple unpacking: `Value::List` direct-index, PyObject

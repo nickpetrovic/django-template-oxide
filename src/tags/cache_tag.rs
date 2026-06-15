@@ -45,12 +45,13 @@ impl Node for CacheNode {
 
         // Check for empty string_if_invalid result (variable not found)
         if let Value::String(ref s) = timeout_val
-            && s.is_empty() {
-                return Err(TemplateError::TemplateSyntaxError(format!(
-                    "\"cache\" tag got an unknown variable: {:?}",
-                    self.expire_time_expr
-                )));
-            }
+            && s.is_empty()
+        {
+            return Err(TemplateError::TemplateSyntaxError(format!(
+                "\"cache\" tag got an unknown variable: {:?}",
+                self.expire_time_expr
+            )));
+        }
 
         let timeout: Option<i64> = match &timeout_val {
             Value::Int(n) => Some(*n),
