@@ -1629,7 +1629,7 @@ impl Node for IfChangedNode {
         // Outside loops, it uses render_context (effectively a no-op since
         // the state is bound to self).
         let (last_value, use_forloop) = if let Some(Value::Dict(forloop)) = context.get("forloop") {
-            (forloop.get(&self.render_key).cloned(), true)
+            (forloop.get(self.render_key.as_str()).cloned(), true)
         } else {
             (context.render_context.get(&self.render_key).cloned(), false)
         };
@@ -1642,7 +1642,10 @@ impl Node for IfChangedNode {
         // Store updated state
         if use_forloop {
             if let Some(Value::Dict(forloop)) = context.base.get_mut("forloop") {
-                forloop.insert(self.render_key.clone(), Value::String(current.clone()));
+                forloop.insert(
+                    self.render_key.as_str().into(),
+                    Value::String(current.clone()),
+                );
             }
         } else {
             context

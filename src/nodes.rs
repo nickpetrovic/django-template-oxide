@@ -883,7 +883,7 @@ fn resolve_base_variable(
             let mut cur: &Value = head;
             for (i, part) in parts[1..].iter().enumerate() {
                 match cur {
-                    Value::Dict(map) => match map.get(part) {
+                    Value::Dict(map) => match map.get(part.as_str()) {
                         Some(v) => {
                             cur = v;
                         }

@@ -475,7 +475,10 @@ impl Node for BlockNode {
         let super_content = render_block_super(py, context, &self.name)?;
 
         let mut block_dict = crate::context::ValueMap::default();
-        block_dict.insert("super".to_string(), Value::SafeString(super_content.into()));
+        block_dict.insert(
+            compact_str::CompactString::const_new("super"),
+            Value::SafeString(super_content.into()),
+        );
         context.push_with({
             let mut m = HashMap::new();
             m.insert("block".to_owned(), Value::Dict(block_dict));
@@ -541,7 +544,7 @@ fn render_block_super(
     // Set up block.super for the parent's render
     let mut block_dict = crate::context::ValueMap::default();
     block_dict.insert(
-        "super".to_string(),
+        compact_str::CompactString::const_new("super"),
         Value::SafeString(parent_super_content.into()),
     );
     context.push_with({

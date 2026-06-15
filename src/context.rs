@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
 
+use compact_str::CompactString;
 use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
@@ -73,7 +74,7 @@ impl Hasher for FastHasher {
 /// FastHasher-backed HashMap for context dict storage.
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
-pub type ValueMap = IndexMap<String, Value, BuildHasherDefault<FastHasher>>;
+pub type ValueMap = IndexMap<CompactString, Value, BuildHasherDefault<FastHasher>>;
 
 /// Any value that can appear in a Django template context. Python types
 /// not mappable to a Rust variant stay `Py<PyAny>`. `SafeString` uses
@@ -212,13 +213,13 @@ impl<T: Into<Value>> From<Vec<T>> for Value {
 
 impl From<HashMap<String, Value>> for Value {
     fn from(m: HashMap<String, Value>) -> Self {
-        Value::Dict(m.into_iter().collect())
+        Value::Dict(m.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 }
 
 impl From<IndexMap<String, Value>> for Value {
     fn from(m: IndexMap<String, Value>) -> Self {
-        Value::Dict(m.into_iter().collect())
+        Value::Dict(m.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 }
 
@@ -349,7 +350,7 @@ impl Value {
             Value::Dict(map) => {
                 let dict = PyDict::new(py);
                 for (k, v) in map {
-                    dict.set_item(k, v.to_pyobject(py)).unwrap();
+                    dict.set_item(k.as_str(), v.to_pyobject(py)).unwrap();
                 }
                 dict.into_any().unbind()
             }

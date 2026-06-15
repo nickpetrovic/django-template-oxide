@@ -377,15 +377,16 @@ impl ForNode {
             // 3 revcounter0, 4 first, 5 last, 6 length, [7 parentloop].
             let mut forloop =
                 crate::context::ValueMap::with_capacity_and_hasher(8, Default::default());
-            forloop.insert("counter".to_owned(), Value::Int(0));
-            forloop.insert("counter0".to_owned(), Value::Int(0));
-            forloop.insert("revcounter".to_owned(), Value::Int(0));
-            forloop.insert("revcounter0".to_owned(), Value::Int(0));
-            forloop.insert("first".to_owned(), Value::Bool(false));
-            forloop.insert("last".to_owned(), Value::Bool(false));
-            forloop.insert("length".to_owned(), Value::Int(len as i64));
+            use compact_str::CompactString;
+            forloop.insert(CompactString::const_new("counter"), Value::Int(0));
+            forloop.insert(CompactString::const_new("counter0"), Value::Int(0));
+            forloop.insert(CompactString::const_new("revcounter"), Value::Int(0));
+            forloop.insert(CompactString::const_new("revcounter0"), Value::Int(0));
+            forloop.insert(CompactString::const_new("first"), Value::Bool(false));
+            forloop.insert(CompactString::const_new("last"), Value::Bool(false));
+            forloop.insert(CompactString::const_new("length"), Value::Int(len as i64));
             if let Some(ref pl) = parentloop {
-                forloop.insert("parentloop".to_owned(), pl.clone());
+                forloop.insert(CompactString::const_new("parentloop"), pl.clone());
             }
             context.set("forloop".to_owned(), Value::Dict(forloop));
         }
