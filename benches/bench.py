@@ -278,6 +278,7 @@ class _Application:
         "html_blob",
         "deep",
         "meta",
+        "bio",
     )
 
     def __init__(self, i):
@@ -300,6 +301,13 @@ class _Application:
             else '<script>alert("xss")</script>&copy;'
         )
         self.deep = _Deep(f"deep-{i}")
+        # Prose paragraph with HTML metachars, a URL, and many words/lines
+        # for long-text autoescape and string-filter throughput cases.
+        self.bio = (
+            f"Senior engineer & <designer> #{i} with 10+ years.\n"
+            'Built systems "at scale" and shipped often.\n'
+            "More at https://example.com/p?q=1&r=2 today.\n"
+        ) * 3
         self.meta = {
             "k1": f"v{i}-1",
             "k2": f"v{i}-2",
@@ -440,6 +448,49 @@ RENDER_CASES = [
         (
             "{% for app in applications %}"
             "<div>{{ app.html_blob }}</div>"
+            "{% endfor %}"
+        ),
+    ),
+    # Nested loops (parentloop, deeper context stack).
+    (
+        "NESTED LOOP (apps x tags)",
+        (
+            "{% for app in applications %}"
+            "{% for t in app.tags %}{{ forloop.counter }}:{{ t }};{% endfor %}"
+            "{% endfor %}"
+        ),
+    ),
+    # smartif boolean evaluator (and/or/not/in/comparison).
+    (
+        "IF BOOLEAN (and/or/not/in)",
+        (
+            "{% for app in applications %}"
+            "{% if app.rating > 0 and 'red' in app.tags and not app.is_archived %}Y"
+            "{% else %}N{% endif %}"
+            "{% endfor %}"
+        ),
+    ),
+    # i18n gettext path.
+    (
+        "I18N TRANSLATE (per row)",
+        (
+            "{% load i18n %}"
+            "{% for app in applications %}"
+            "{% translate 'Status' %}:{{ app.status }} "
+            "{% endfor %}"
+        ),
+    ),
+    # Long-text autoescape throughput (escape scan over prose).
+    (
+        "LONG TEXT AUTOESCAPE (prose)",
+        "{% for app in applications %}<p>{{ app.bio }}</p>{% endfor %}",
+    ),
+    # String filters over prose (truncatewords + linebreaks).
+    (
+        "PROSE FILTERS (truncatewords|linebreaksbr)",
+        (
+            "{% for app in applications %}"
+            "{{ app.bio|truncatewords:20|linebreaksbr }}"
             "{% endfor %}"
         ),
     ),
