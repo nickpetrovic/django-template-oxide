@@ -4783,3 +4783,243 @@ class TestLexerMonkeyPatchCompat:
             "patched lexer was not invoked on each compile: fast-path "
             "regression"
         )
+
+
+# Bug 5: `ForBatchPlan` pre-extracts `loopvar.path` refs via
+# `operator.attrgetter`, which never auto-calls a callable leaf. So a batched
+# loop (>=2 loopvar paths, PyObject seq) referencing `{{ qs.questions.count }}`
+# rendered the bound-method repr instead of the count.
+#
+# These tests bypass `assert_render_matches`: conftest patches
+# `Template._render` to oxide, so it would compare oxide to itself.
+# `_render_stock_django` restores genuine stock Django for the expected side.
+def _render_stock_django(engine, src, ctx_dict):
+    """Render via genuine stock Django, undoing conftest's render patch."""
+    import django.template.base as _base
+
+    from django_template_oxide import _patch
+
+    saved_render = _base.Template._render
+    nodelist_patched = _patch.is_enabled()
+    if nodelist_patched:
+        _patch.disable_rust_nodelist_acceleration()
+    _base.Template._render = lambda self, context: self.nodelist.render(context)
+    try:
+        return engine.from_string(src).render(DjangoContext(ctx_dict))
+    finally:
+        _base.Template._render = saved_render
+        if nodelist_patched:
+            _patch.enable_rust_nodelist_acceleration()
+
+
+def _assert_oxide_matches_django(engine, src, ctx_dict):
+    dj_out = _render_stock_django(engine, src, ctx_dict)
+    ox_out = OxideTemplate(src, engine=engine).render(OxideContext(ctx_dict))
+    assert ox_out == dj_out, (
+        f"\n  template: {src!r}"
+        f"\n  context:  {ctx_dict!r}"
+        f"\n  django:   {dj_out!r}"
+        f"\n  oxide:    {ox_out!r}"
+    )
+
+
+class _Iterable:
+    """Non-list iterable (QuerySet-like) so it stays a `Value::PyObject` and
+    batching engages; a plain list is Rust-native and skips batching."""
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+
+class _RelatedManagerLike:
+    """Reverse-manager shape: callable + `do_not_call_in_templates`, with
+    `count()`. `__call__` raises so a wrongly-called manager fails loudly."""
+
+    do_not_call_in_templates = True
+
+    def __init__(self, n):
+        self._n = n
+
+    def __call__(self, *args, **kwargs):
+        raise TypeError("Manager isn't callable")
+
+    def count(self):
+        return self._n
+
+
+class _QuestionSetLike:
+    def __init__(self, name, n):
+        self.name = name
+        self.slug = name.lower().replace(" ", "-")
+        self.questions = _RelatedManagerLike(n)
+
+
+class TestForBatchCallableLeaf:
+    """`ForBatchPlan` must auto-call callable leaves, matching Django."""
+
+    def _sets(self):
+        return _Iterable(
+            [
+                _QuestionSetLike("Data Driven", 3),
+                _QuestionSetLike("Operational Excellence", 0),
+                _QuestionSetLike("Risk Assessment", 4),
+            ]
+        )
+
+    def test_attr_then_callable_leaf(self, engine):
+        """The reported bug: `{{ qs.name }}` then `{{ qs.questions.count }}`."""
+        _assert_oxide_matches_django(
+            engine,
+            "{% for qs in items %}{{ qs.name }}={{ qs.questions.count }};{% endfor %}",
+            {"items": self._sets()},
+        )
+
+    def test_callable_leaf_then_attr(self, engine):
+        """Order-independent: callable leaf first still gets called."""
+        _assert_oxide_matches_django(
+            engine,
+            "{% for qs in items %}{{ qs.questions.count }}={{ qs.name }};{% endfor %}",
+            {"items": self._sets()},
+        )
+
+    def test_callable_leaf_with_pluralize(self, engine):
+        """Filtered callable leaf -> BodyProgram filtered-column path."""
+        _assert_oxide_matches_django(
+            engine,
+            (
+                "{% for qs in items %}"
+                "{{ qs.name }}: {{ qs.questions.count }} item{{ qs.questions.count|pluralize }};"
+                "{% endfor %}"
+            ),
+            {"items": self._sets()},
+        )
+
+    def test_three_paths_two_attrs_one_callable(self, engine):
+        """Three batched paths, only one callable."""
+        _assert_oxide_matches_django(
+            engine,
+            "{% for qs in items %}{{ qs.name }}/{{ qs.slug }}/{{ qs.questions.count }};{% endfor %}",
+            {"items": self._sets()},
+        )
+
+    def test_if_on_callable_leaf(self, engine):
+        """`{% if qs.questions.count %}` truthiness uses the called value (0 -> falsy)."""
+        _assert_oxide_matches_django(
+            engine,
+            (
+                "{% for qs in items %}"
+                "{% if qs.questions.count %}{{ qs.name }}={{ qs.questions.count }}"
+                "{% else %}{{ qs.name }}=empty{% endif %};"
+                "{% endfor %}"
+            ),
+            {"items": self._sets()},
+        )
+
+    def test_do_not_call_leaf_is_not_called(self, engine):
+        """`do_not_call_in_templates` leaf is rendered as repr, not called."""
+        _assert_oxide_matches_django(
+            engine,
+            "{% for qs in items %}{{ qs.name }}={{ qs.questions }};{% endfor %}",
+            {"items": self._sets()},
+        )
+
+    def test_alters_data_leaf(self, engine):
+        """`alters_data` leaf -> string_if_invalid, not the call result."""
+
+        class _Danger:
+            def __init__(self, name):
+                self.name = name
+
+            def danger(self):
+                return "RAN"
+
+            danger.alters_data = True
+
+        _assert_oxide_matches_django(
+            engine,
+            "{% for o in items %}{{ o.name }}={{ o.danger }};{% endfor %}",
+            {"items": _Iterable([_Danger("a"), _Danger("b")])},
+        )
+
+    def test_method_requiring_args_leaf(self, engine):
+        """Arg-requiring leaf can't be auto-called -> string_if_invalid."""
+
+        class _NeedsArg:
+            def __init__(self, name):
+                self.name = name
+
+            def needs(self, x):
+                return x
+
+        _assert_oxide_matches_django(
+            engine,
+            "{% for o in items %}{{ o.name }}={{ o.needs }};{% endfor %}",
+            {"items": _Iterable([_NeedsArg("a"), _NeedsArg("b")])},
+        )
+
+    def test_two_callable_leaves(self, engine):
+        """Two distinct callable leaves are both called."""
+
+        class _Two:
+            def __init__(self, a, b):
+                self.a = _RelatedManagerLike(a)
+                self.b = _RelatedManagerLike(b)
+
+        _assert_oxide_matches_django(
+            engine,
+            "{% for o in items %}{{ o.a.count }}/{{ o.b.count }};{% endfor %}",
+            {"items": _Iterable([_Two(1, 2), _Two(3, 4)])},
+        )
+
+    def test_single_callable_leaf_no_batch(self, engine):
+        """One path -> no batching; the leaf still auto-calls dynamically."""
+        _assert_oxide_matches_django(
+            engine,
+            "{% for qs in items %}{{ qs.questions.count }};{% endfor %}",
+            {"items": self._sets()},
+        )
+
+    def test_plain_attr_only_loop_unaffected(self, engine):
+        """Field-only batched loop still matches (fast path untouched)."""
+        _assert_oxide_matches_django(
+            engine,
+            "{% for qs in items %}{{ qs.name }}/{{ qs.slug }};{% endfor %}",
+            {"items": self._sets()},
+        )
+
+    def test_callable_leaf_with_forloop_counter(self, engine):
+        """A callable leaf next to `forloop.counter` (non-loopvar path)."""
+        _assert_oxide_matches_django(
+            engine,
+            (
+                "{% for qs in items %}"
+                "{{ forloop.counter }}.{{ qs.name }}={{ qs.questions.count }};"
+                "{% endfor %}"
+            ),
+            {"items": self._sets()},
+        )
+
+    def test_callable_leaf_raising_typeerror_propagates(self, engine):
+        """A no-arg leaf raising TypeError internally must propagate, not be
+        swallowed to string_if_invalid (Django's signature().bind() check)."""
+
+        class _Boom:
+            def __init__(self, name):
+                self.name = name
+
+            def boom(self):
+                raise TypeError("internal boom")
+
+        ctx = {"items": _Iterable([_Boom("a"), _Boom("b")])}
+        src = "{% for o in items %}{{ o.name }}={{ o.boom }};{% endfor %}"
+
+        with pytest.raises(TypeError):
+            _render_stock_django(engine, src, ctx)
+        with pytest.raises(TypeError):
+            OxideTemplate(src, engine=engine).render(OxideContext(ctx))

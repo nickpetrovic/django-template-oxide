@@ -58,6 +58,7 @@ fn prebatch_extract_from_iterable(
     py: pyo3::Python<'_>,
     plan: &ForBatchPlan,
     iterable: &pyo3::Bound<'_, pyo3::PyAny>,
+    string_if_invalid: &str,
 ) -> pyo3::PyResult<Vec<Py<pyo3::PyAny>>> {
     use pyo3::types::PyList;
 
@@ -75,7 +76,58 @@ fn prebatch_extract_from_iterable(
     for tup in result_list.iter() {
         out.push(tup.unbind());
     }
+
+    // attrgetter never auto-calls; Django does. Call callable leaves so
+    // `{{ item.related.count }}` isn't rendered as a bound-method repr.
+    autocall_callable_leaves(py, &mut out, string_if_invalid)?;
+
     Ok(out)
+}
+
+/// Auto-call callable leaves in the pre-extracted tuples (Django leaf
+/// semantics). Callable slots are detected from row 0 (homogeneous iterable);
+/// loops with none are left untouched, preserving the field-only fast path.
+fn autocall_callable_leaves(
+    py: pyo3::Python<'_>,
+    rows: &mut [Py<pyo3::PyAny>],
+    string_if_invalid: &str,
+) -> pyo3::PyResult<()> {
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    let first = first.bind(py);
+    let n_slots = first.len()?;
+
+    let mut callable_slots: Vec<usize> = Vec::new();
+    for i in 0..n_slots {
+        let el = first.get_item(i)?;
+        if crate::nodes::is_template_leaf_callable(&el) {
+            callable_slots.push(i);
+        }
+    }
+    if callable_slots.is_empty() {
+        return Ok(());
+    }
+
+    for row in rows.iter_mut() {
+        let bound = row.bind(py);
+        let mut elems: Vec<pyo3::Bound<'_, pyo3::PyAny>> = Vec::with_capacity(n_slots);
+        for i in 0..n_slots {
+            elems.push(bound.get_item(i)?);
+        }
+        for &slot in &callable_slots {
+            if crate::nodes::is_template_leaf_callable(&elems[slot]) {
+                crate::nodes::maybe_call_template_callable(
+                    py,
+                    &mut elems[slot],
+                    string_if_invalid,
+                )?;
+            }
+        }
+        *row = pyo3::types::PyTuple::new(py, &elems)?.unbind().into_any();
+    }
+
+    Ok(())
 }
 
 /// Cached `builtins.map` / `builtins.list` to skip FFI lookups per prebatch.
@@ -410,7 +462,8 @@ impl ForNode {
                     if self.is_reversed {
                         None
                     } else {
-                        prebatch_extract_from_iterable(py, plan, bound).ok()
+                        prebatch_extract_from_iterable(py, plan, bound, &context.string_if_invalid)
+                            .ok()
                     }
                 }
                 _ => None,

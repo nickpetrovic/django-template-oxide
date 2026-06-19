@@ -1258,7 +1258,7 @@ fn resolve_pyobject_callable(
 
 /// Auto-call callable lookup result. Shared between the dict fast path
 /// and the slow path of `resolve_pyobject_lookups`.
-fn maybe_call_template_callable<'py>(
+pub(crate) fn maybe_call_template_callable<'py>(
     py: Python<'py>,
     current: &mut Bound<'py, pyo3::PyAny>,
     string_if_invalid: &str,
@@ -1288,10 +1288,22 @@ fn maybe_call_template_callable<'py>(
             Ok(())
         }
         Err(call_err) => {
-            // TypeError (required args) becomes string_if_invalid.
             if call_err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
-                *current = string_if_invalid.into_pyobject(py).unwrap().into_any();
-                Ok(())
+                // Per Django: missing required args -> string_if_invalid; a
+                // TypeError raised inside a zero-arg call -> re-raise. `bind()`
+                // succeeding means it took no args, so the error came from within.
+                let required_args = py
+                    .import("inspect")
+                    .and_then(|inspect| inspect.getattr("signature"))
+                    .and_then(|sig_fn| sig_fn.call1((&*current,)))
+                    .and_then(|sig| sig.call_method0("bind"))
+                    .is_err();
+                if required_args {
+                    *current = string_if_invalid.into_pyobject(py).unwrap().into_any();
+                    Ok(())
+                } else {
+                    Err(TemplateError::from(call_err))
+                }
             } else {
                 Err(TemplateError::from(call_err))
             }
@@ -1314,6 +1326,14 @@ fn is_primitive_or_collection(obj: &Bound<'_, pyo3::PyAny>) -> bool {
         || obj.is_exact_instance_of::<PyInt>()
         || obj.is_exact_instance_of::<PyFloat>()
         || obj.is_exact_instance_of::<PyBool>()
+}
+
+/// Cheap pre-filter for an auto-callable leaf: callable and not an exact
+/// primitive/collection. `do_not_call_in_templates`/`alters_data` are checked
+/// later by [`maybe_call_template_callable`].
+#[inline]
+pub(crate) fn is_template_leaf_callable(obj: &Bound<'_, pyo3::PyAny>) -> bool {
+    !is_primitive_or_collection(obj) && type_is_callable(obj)
 }
 
 type FastHashMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::FixedState>;
