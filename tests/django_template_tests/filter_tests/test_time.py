@@ -27,7 +27,7 @@ class TimeTests(TimezoneTestCase):
     @setup({"time01": '{{ dt|time:"e:O:T:Z" }}'})
     def test_time01(self):
         output = self.engine.render_to_string("time01", {"dt": self.now_tz_i})
-        self.assertEqual(output, "+0315:+0315:+0315:11700")
+        self.assertEqual(output, "CDT:-0500:CDT:-18000")
 
     @setup({"time02": '{{ dt|time:"e:T" }}'})
     def test_time02(self):

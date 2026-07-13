@@ -29,6 +29,8 @@ pub struct DjangoModules {
     pub translation: Py<PyAny>,
     pub gettext_lazy: Py<PyAny>,
     pub pgettext_lazy: Py<PyAny>,
+
+    pub template_localtime: Py<PyAny>,
 }
 
 impl DjangoModules {
@@ -38,6 +40,7 @@ impl DjangoModules {
         let exc = py.import("django.template.exceptions")?;
         let ss = py.import("django.utils.safestring")?;
         let tr = py.import("django.utils.translation")?;
+        let tz = py.import("django.utils.timezone")?;
 
         let variable_does_not_exist_cls = base.getattr("VariableDoesNotExist")?.unbind();
 
@@ -63,6 +66,8 @@ impl DjangoModules {
             gettext_lazy: tr.getattr("gettext_lazy")?.unbind(),
             pgettext_lazy: tr.getattr("pgettext_lazy")?.unbind(),
             translation: tr.into_any().unbind(),
+
+            template_localtime: tz.getattr("template_localtime")?.unbind(),
         })
     }
 }
