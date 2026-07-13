@@ -804,6 +804,24 @@ fn apply_translation_rust(
     Ok(Value::from(&result))
 }
 
+fn apply_expects_localtime(
+    py: Python<'_>,
+    value: &Value,
+    context: &Context,
+) -> Result<Value, TemplateError> {
+    let Value::PyObject(obj) = value else {
+        return Ok(value.clone());
+    };
+    let dj = crate::python_cache::django(py)
+        .map_err(|e| TemplateError::Internal(format!("Cannot import Django modules: {e}")))?;
+    let result = dj
+        .template_localtime
+        .bind(py)
+        .call1((obj.bind(py), context.use_tz))
+        .map_err(|e| TemplateError::Internal(format!("{e}")))?;
+    Ok(Value::from(&result))
+}
+
 /// Resolve just the base variable part of a `FilterExpression`. Native
 /// Rust types stay Rust-side; PyObject values go through Python's
 /// attribute/item lookup, matching `Variable._resolve_lookup`.
@@ -1699,6 +1717,9 @@ fn resolve_with_filters_inner(
 
         let result = if let Some(native) = native {
             let _g3 = crate::prof::Guard::new("filters: native_dispatch");
+            if native.expects_localtime {
+                obj = apply_expects_localtime(py, &obj, context)?;
+            }
             let autoescape = if native.needs_autoescape {
                 context.autoescape
             } else {

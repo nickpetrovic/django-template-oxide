@@ -54,7 +54,7 @@ class DateTests(TimezoneTestCase):
             "date06",
             {"d": datetime(2009, 3, 12, tzinfo=timezone.get_fixed_timezone(30))},
         )
-        self.assertEqual(output, "+0030")
+        self.assertEqual(output, "CDT")
 
     @setup({"date07": '{{ d|date:"e" }}'})
     def test_date07(self):
@@ -76,6 +76,19 @@ class DateTests(TimezoneTestCase):
     def test_date_lazy(self):
         output = self.engine.render_to_string("datelazy", {"t": time(0, 0)})
         self.assertEqual(output, "00:00")
+
+    @setup({"date_active_timezone": '{{ d|date:"H:i e" }}'})
+    def test_date_active_timezone(self):
+        """
+        The ``date`` filter honors ``expects_localtime``: an aware
+        datetime is converted to the currently active timezone (not just
+        formatted with its own stored tzinfo) before the native filter
+        reads its components.
+        """
+        d = datetime(2008, 1, 1, 12, 0, tzinfo=timezone.get_fixed_timezone(0))
+        with timezone.override(timezone.get_fixed_timezone(-120)):
+            output = self.engine.render_to_string("date_active_timezone", {"d": d})
+        self.assertEqual(output, "10:00 -0200")
 
 
 class FunctionTests(SimpleTestCase):
