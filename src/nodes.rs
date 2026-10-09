@@ -628,58 +628,19 @@ fn format_invalid_message(string_if_invalid: &str, var_expr: &str) -> String {
     }
 }
 
-/// Index a string by char position (`{{ s.0 }}`), preserving safety.
-/// Returns `None` on non-integer or out-of-range.
-fn string_index_lookup(s: &str, part: &str, was_safe: bool) -> Option<Value> {
-    let idx = part.parse::<usize>().ok()?;
-    let ch = s.chars().nth(idx)?;
-    let ch_str = ch.to_string();
-    Some(if was_safe {
-        Value::SafeString(ch_str.into())
-    } else {
-        Value::String(ch_str)
-    })
-}
-
-/// Like `resolve_expression_rust` but missing variables resolve to
-/// `Value::None`. Matches Django's `resolve(context, ignore_failures=True)`.
-///
-/// Django's `FilterExpression.resolve(context, ignore_failures=True)`
-/// returns `None` when the variable doesn't exist, regardless of the
-/// engine's `string_if_invalid` setting.  We detect a missing variable
-/// by temporarily blanking `string_if_invalid` so the base resolver
-/// produces an empty string on miss, then convert that empty string to
-/// `Value::None`.
 pub fn resolve_expression_ignore_failures(
     py: Python<'_>,
     fe: &FilterExpression,
     context: &Context,
 ) -> Result<Value, TemplateError> {
     if fe.filters.is_empty() {
-        let mut val = resolve_base_variable(py, fe, context)?;
+        let Some(mut val) = resolve_base_variable_opt(py, fe, context)? else {
+            return Ok(Value::None);
+        };
         if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var
             && variable.translate
         {
             val = apply_translation_rust(py, &val, variable.message_context.as_deref())?;
-        }
-        if fe.is_var {
-            match &val {
-                Value::String(s) if s.is_empty() => {
-                    return Ok(Value::None);
-                }
-                Value::String(s) if !context.string_if_invalid.is_empty() => {
-                    // If the resolved value equals what string_if_invalid
-                    // would produce, the variable was missing.
-                    if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var {
-                        let expected =
-                            format_invalid_message(&context.string_if_invalid, &variable.var);
-                        if s == &expected {
-                            return Ok(Value::None);
-                        }
-                    }
-                }
-                _ => {}
-            }
         }
         Ok(val)
     } else {
@@ -822,156 +783,108 @@ fn apply_expects_localtime(
     Ok(Value::from(&result))
 }
 
-/// Resolve just the base variable part of a `FilterExpression`. Native
-/// Rust types stay Rust-side; PyObject values go through Python's
-/// attribute/item lookup, matching `Variable._resolve_lookup`.
-// Deliberately not `inline(always)`: large body, no measurable benefit.
 #[inline]
 fn resolve_base_variable(
     py: Python<'_>,
     fe: &FilterExpression,
     context: &Context,
 ) -> Result<Value, TemplateError> {
+    match resolve_base_variable_opt(py, fe, context)? {
+        Some(value) => Ok(value),
+        None => Ok(Value::String(missing_variable_message(fe, context))),
+    }
+}
+
+fn missing_variable_message(fe: &FilterExpression, context: &Context) -> String {
+    match &fe.var {
+        crate::variable::FilterExpressionVar::Var(variable) => {
+            format_invalid_message(&context.string_if_invalid, &variable.var)
+        }
+        crate::variable::FilterExpressionVar::Constant(_) => context.string_if_invalid.clone(),
+    }
+}
+
+#[inline]
+fn resolve_base_variable_opt(
+    py: Python<'_>,
+    fe: &FilterExpression,
+    context: &Context,
+) -> Result<Option<Value>, TemplateError> {
     let _g = crate::prof::Guard::new("resolve_base_variable");
     use crate::variable::FilterExpressionVar;
 
     match &fe.var {
         FilterExpressionVar::Var(variable) => {
             if !variable.is_lookup() {
-                // String literals are marked safe (Django mark_safe).
                 if let Some(s) = variable.as_string_literal() {
-                    return Ok(Value::SafeString(s.to_owned().into()));
+                    return Ok(Some(Value::SafeString(s.to_owned().into())));
                 }
                 if let Some(n) = variable.as_int_literal() {
-                    return Ok(Value::Int(n));
+                    return Ok(Some(Value::Int(n)));
                 }
                 if let Some(f) = variable.as_float_literal() {
-                    return Ok(Value::Float(f));
+                    return Ok(Some(Value::Float(f)));
                 }
             }
 
-            // Pre-parsed lookup path from `variable.value`; re-splitting
-            // `variable.var` here would burn ~2500 Vec allocations per
-            // render on heavy templates.
             let parts: &[String] = variable
                 .lookups()
                 .expect("non-lookup variable handled by literal arms above");
 
-            // Batched-loop fast path: if the for-loop's ForBatchPlan
-            // pre-stamped a slot on this variable, read the resolved
-            // value from the current tuple (single FFI call, no
-            // getattr chain). Outside batched loops the block is a
-            // single null-check.
             if let Some(slot) = variable.batch_slot()
                 && let Some(cache) = context.loop_batch_cache.as_ref()
+                && cache.loopvar == parts[0]
             {
                 let tuple = cache.current_tuple.bind(py);
                 if let Ok(val) = tuple.get_item(slot as usize) {
-                    return Ok(value_from_pyany_fast(&val));
+                    return Ok(Some(value_from_pyany_fast(&val)));
                 }
             }
 
-            // Borrow head; we only clone when walking Rust Dict/List.
-            let head = match context.get(&parts[0]) {
-                Some(v) => v,
-                None => {
-                    return Ok(Value::String(format_invalid_message(
-                        &context.string_if_invalid,
-                        &variable.var,
-                    )));
-                }
+            let Some(head) = context.get(&parts[0]) else {
+                return Ok(None);
             };
 
-            // PyObject head: delegate the whole chain to Python.
             if let Value::PyObject(obj) = head {
                 if parts.len() > 1 {
-                    return resolve_pyobject_lookups(
+                    return resolve_pyobject_lookups_opt(
                         py,
                         obj.bind(py),
                         &parts[1..],
                         &context.string_if_invalid,
                     );
                 }
-                return resolve_pyobject_callable(py, head, &context.string_if_invalid);
+                return resolve_pyobject_callable(py, head, &context.string_if_invalid).map(Some);
             }
 
-            // Walk Rust Dict/List by borrowed reference; only the leaf
-            // is cloned. Cloning per step previously cost ~22us per
-            // render for `forloop.counter`-heavy templates.
             let mut cur: &Value = head;
             for (i, part) in parts[1..].iter().enumerate() {
-                match cur {
-                    Value::Dict(map) => match map.get(part.as_str()) {
-                        Some(v) => {
-                            cur = v;
-                        }
-                        None => {
-                            return Ok(Value::String(format_invalid_message(
-                                &context.string_if_invalid,
-                                &variable.var,
-                            )));
-                        }
-                    },
-                    Value::List(items) => {
-                        match part.parse::<usize>().ok().and_then(|idx| items.get(idx)) {
-                            Some(v) => {
-                                cur = v;
-                            }
-                            None => {
-                                return Ok(Value::String(format_invalid_message(
-                                    &context.string_if_invalid,
-                                    &variable.var,
-                                )));
-                            }
-                        }
-                    }
-                    // String/SafeString/PyObject are terminal: return
-                    // directly so the loop body keeps walking &Value.
-                    Value::String(s) => {
-                        return Ok(string_index_lookup(s.as_str(), part, false).unwrap_or_else(
-                            || {
-                                Value::String(format_invalid_message(
-                                    &context.string_if_invalid,
-                                    &variable.var,
-                                ))
-                            },
-                        ));
-                    }
-                    Value::SafeString(s) => {
-                        return Ok(string_index_lookup(s.as_ref(), part, true).unwrap_or_else(
-                            || {
-                                Value::String(format_invalid_message(
-                                    &context.string_if_invalid,
-                                    &variable.var,
-                                ))
-                            },
-                        ));
-                    }
-                    Value::PyObject(obj) => {
-                        return resolve_pyobject_lookups(
+                let native_step = match cur {
+                    Value::Dict(map) => map.get(part.as_str()),
+                    Value::List(items) => part.parse::<usize>().ok().and_then(|idx| items.get(idx)),
+                    _ => None,
+                };
+                match native_step {
+                    Some(v) => cur = v,
+                    None => {
+                        let obj = cur.to_pyobject(py);
+                        return resolve_pyobject_lookups_opt(
                             py,
                             obj.bind(py),
                             &parts[1 + i..],
                             &context.string_if_invalid,
                         );
                     }
-                    _ => {
-                        return Ok(Value::String(format_invalid_message(
-                            &context.string_if_invalid,
-                            &variable.var,
-                        )));
-                    }
                 }
             }
-            // End of chain via Dict/List borrows; single leaf clone.
             if matches!(cur, Value::PyObject(_)) {
-                return resolve_pyobject_callable(py, cur, &context.string_if_invalid);
+                return resolve_pyobject_callable(py, cur, &context.string_if_invalid).map(Some);
             }
-            Ok(cur.clone())
+            Ok(Some(cur.clone()))
         }
         FilterExpressionVar::Constant(opt) => match opt {
-            Some(s) => Ok(Value::SafeString(s.clone().into())),
-            None => Ok(Value::None),
+            Some(s) => Ok(Some(Value::SafeString(s.clone().into()))),
+            None => Ok(Some(Value::None)),
         },
     }
 }
@@ -987,6 +900,19 @@ fn resolve_pyobject_lookups(
     parts: &[String],
     string_if_invalid: &str,
 ) -> Result<Value, TemplateError> {
+    Ok(
+        resolve_pyobject_lookups_opt(py, start, parts, string_if_invalid)?
+            .unwrap_or_else(|| Value::String(string_if_invalid.to_owned())),
+    )
+}
+
+#[inline]
+fn resolve_pyobject_lookups_opt(
+    py: Python<'_>,
+    start: &Bound<'_, pyo3::PyAny>,
+    parts: &[String],
+    string_if_invalid: &str,
+) -> Result<Option<Value>, TemplateError> {
     let _g = crate::prof::Guard::new("resolve_pyobject_lookups");
     use pyo3::types::{PyDict, PyList, PyTuple};
 
@@ -1006,7 +932,7 @@ fn resolve_pyobject_lookups(
                 .and_then(|v| v.is_truthy().ok())
                 .unwrap_or(false);
             if alters_data {
-                return Ok(Value::String(string_if_invalid.to_owned()));
+                return Ok(Some(Value::String(string_if_invalid.to_owned())));
             }
             if let Ok(val) = current.call0() {
                 current = val;
@@ -1187,33 +1113,8 @@ fn resolve_pyobject_lookups(
     })();
 
     match result {
-        Ok(val) => {
-            // Skip `Value::from`'s `getattr("__html__")` FFI for plain
-            // str/int/bool/None and bare dict/list. SafeString/datetime/
-            // Promise/etc. fall through to `Value::from`.
-            use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
-            if val.is_exact_instance_of::<PyString>() {
-                if let Ok(s) = val.extract::<String>() {
-                    return Ok(Value::String(s));
-                }
-            } else if val.is_exact_instance_of::<PyBool>() {
-                return Ok(Value::Bool(val.extract::<bool>().unwrap_or(false)));
-            } else if val.is_exact_instance_of::<PyInt>() {
-                if let Ok(n) = val.extract::<i64>() {
-                    return Ok(Value::Int(n));
-                }
-            } else if val.is_exact_instance_of::<PyFloat>() {
-                if let Ok(f) = val.extract::<f64>() {
-                    return Ok(Value::Float(f));
-                }
-            } else if val.is_none() {
-                return Ok(Value::None);
-            }
-            Ok(Value::from(&val))
-        }
-        Err(None) => Ok(Value::String(string_if_invalid.to_owned())),
-        // Respect silent_variable_failure; treat KeyError as soft
-        // failure (Django historical); otherwise propagate.
+        Ok(val) => Ok(Some(value_from_pyany_fast(&val))),
+        Err(None) => Ok(None),
         Err(Some(e)) => {
             let silent = e
                 .value(py)
@@ -1223,7 +1124,7 @@ fn resolve_pyobject_lookups(
                 .unwrap_or(false);
 
             if silent || e.is_instance_of::<pyo3::exceptions::PyKeyError>(py) {
-                Ok(Value::String(string_if_invalid.to_owned()))
+                Ok(Some(Value::String(string_if_invalid.to_owned())))
             } else {
                 Err(TemplateError::PythonError(e))
             }
@@ -1653,45 +1554,26 @@ fn resolve_with_filters_inner(
         None
     };
 
-    let mut obj = {
+    let resolved = {
         let _g2 = crate::prof::Guard::new("filters: base_resolve");
-        resolve_base_variable(py, fe, context)?
+        resolve_base_variable_opt(py, fe, context)?
     };
 
-    if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var
-        && variable.translate
-    {
-        obj = apply_translation_rust(py, &obj, variable.message_context.as_deref())?;
-    }
-
-    // Django's FilterExpression.resolve (base.py:792-798): when the
-    // base variable is missing and string_if_invalid is non-empty,
-    // return string_if_invalid immediately WITHOUT running filters.
-    if !ignore_failures
-        && fe.is_var
-        && !context.string_if_invalid.is_empty()
-        && let crate::variable::FilterExpressionVar::Var(variable) = &fe.var
-    {
-        // Detect a variable miss: the resolved value equals what
-        // format_invalid_message would produce.
-        let expected = format_invalid_message(&context.string_if_invalid, &variable.var);
-        if let Value::String(ref s) = obj
-            && *s == expected
-        {
-            return Ok(obj);
+    let mut obj = match resolved {
+        Some(mut value) => {
+            if let crate::variable::FilterExpressionVar::Var(variable) = &fe.var
+                && variable.translate
+            {
+                value = apply_translation_rust(py, &value, variable.message_context.as_deref())?;
+            }
+            value
         }
-    }
-
-    // Convert empty-string miss to None so `default` / `default_if_none`
-    // see the right input.
-    if ignore_failures
-        && fe.is_var
-        && let Value::String(ref s) = obj
-        && s.is_empty()
-        && context.string_if_invalid.is_empty()
-    {
-        obj = Value::None;
-    }
+        None if ignore_failures => Value::None,
+        None if !context.string_if_invalid.is_empty() => {
+            return Ok(Value::String(missing_variable_message(fe, context)));
+        }
+        None => Value::String(String::new()),
+    };
 
     for (idx, parsed_filter) in fe.filters.iter().enumerate() {
         let n_args = parsed_filter.args.len();

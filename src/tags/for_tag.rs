@@ -416,12 +416,26 @@ impl ForNode {
             return Ok(());
         }
 
-        let len = items.len();
         out.reserve(items.len() * 32);
 
         context.push();
+        let outer_batch_cache = context.loop_batch_cache.take();
+        let outcome = self.render_iterations(py, context, out, items, &seq_value);
+        context.loop_batch_cache = outer_batch_cache;
+        context.pop();
+        outcome
+    }
 
-        // Skip the forloop dict when the body doesn't reference it.
+    fn render_iterations(
+        &self,
+        py: Python<'_>,
+        context: &mut Context,
+        out: &mut String,
+        items: Vec<Value>,
+        seq_value: &Value,
+    ) -> Result<(), TemplateError> {
+        let len = items.len();
+
         if self.body_uses_forloop {
             let parentloop = context.get("forloop").cloned();
 
@@ -454,7 +468,7 @@ impl ForNode {
         // hop covering N items × M attrs. Source iterable used
         // directly (no PyList::append per item).
         let pre_extracted: Option<Vec<Py<pyo3::PyAny>>> =
-            match (single_loopvar.as_ref(), &self.batch_plan, &seq_value) {
+            match (single_loopvar.as_ref(), &self.batch_plan, seq_value) {
                 (Some(_), Some(plan), Value::PyObject(obj)) => {
                     let bound = obj.bind(py);
                     // Skip batching for the rare reversed-loop case
@@ -544,7 +558,6 @@ impl ForNode {
                 match &item {
                     Value::List(sub_items) => {
                         if sub_items.len() != num_loopvars {
-                            context.pop();
                             return Err(TemplateError::PythonError(
                                 pyo3::exceptions::PyValueError::new_err(format!(
                                     "Need {} values to unpack in for loop; got {}.",
@@ -563,7 +576,6 @@ impl ForNode {
                         let chars: Vec<Value> =
                             s.chars().map(|c| Value::String(c.to_string())).collect();
                         if chars.len() != num_loopvars {
-                            context.pop();
                             return Err(TemplateError::PythonError(
                                 pyo3::exceptions::PyValueError::new_err(format!(
                                     "Need {} values to unpack in for loop; got {}.",
@@ -580,7 +592,6 @@ impl ForNode {
                         let chars: Vec<Value> =
                             s.chars().map(|c| Value::String(c.to_string())).collect();
                         if chars.len() != num_loopvars {
-                            context.pop();
                             return Err(TemplateError::PythonError(
                                 pyo3::exceptions::PyValueError::new_err(format!(
                                     "Need {} values to unpack in for loop; got {}.",
@@ -613,7 +624,6 @@ impl ForNode {
                             }
                         }
                         if unpacked.len() != num_loopvars {
-                            context.pop();
                             return Err(TemplateError::PythonError(
                                 pyo3::exceptions::PyValueError::new_err(format!(
                                     "Need {} values to unpack in for loop; got {}.",
@@ -628,7 +638,6 @@ impl ForNode {
                     }
                     Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::None => {
                         // Non-iterable: cannot unpack
-                        context.pop();
                         return Err(TemplateError::PythonError(
                             pyo3::exceptions::PyValueError::new_err(format!(
                                 "Need {} values to unpack in for loop; got 1.",
@@ -670,12 +679,6 @@ impl ForNode {
                 self.nodelist_loop.render_into(py, context, out)?;
             }
         }
-
-        // Tear down the batch cache so that code rendered after the loop
-        // (or nested loops on the same context) doesn't see stale data.
-        context.loop_batch_cache = None;
-
-        context.pop();
 
         Ok(())
     }

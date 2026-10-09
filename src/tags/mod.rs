@@ -440,7 +440,7 @@ impl Node for WithNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         let mut values: ContextDict = HashMap::new();
         for (name, fe) in &self.extra_context {
-            let val = resolve_if_value(py, fe, context);
+            let val = crate::nodes::resolve_expression_rust(py, fe, context)?;
             values.insert(name.clone(), val);
         }
 

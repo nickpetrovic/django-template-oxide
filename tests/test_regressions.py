@@ -45,6 +45,7 @@ from django.template import TemplateSyntaxError as DjangoTemplateSyntaxError  # 
 from django.template.loader import get_template as dj_get_template  # noqa: E402
 from django.test import RequestFactory  # noqa: E402
 from django.urls import path, set_urlconf  # noqa: E402
+from django.utils.safestring import mark_safe  # noqa: E402
 
 from django_template_oxide._rust import Context as OxideContext  # noqa: E402
 from django_template_oxide._rust import Template as OxideTemplate  # noqa: E402
@@ -5023,3 +5024,266 @@ class TestForBatchCallableLeaf:
             _render_stock_django(engine, src, ctx)
         with pytest.raises(TypeError):
             OxideTemplate(src, engine=engine).render(OxideContext(ctx))
+
+
+_Stage = namedtuple("_Stage", "name color")
+_StageGroup = namedtuple("_StageGroup", "stage entries")
+_Question = namedtuple("_Question", "label")
+_Answer = namedtuple("_Answer", "field value")
+
+
+class _ReversibleIterable(_Iterable):
+    def __reversed__(self):
+        return reversed(self._items)
+
+
+class _AnswerWithoutField:
+    value = "orphan"
+
+
+_NESTED_LOOP_TEMPLATES = {
+    "answers.html": "{% for answer in answers %}{{ answer.field.label }}={{ answer.value }};{% endfor %}",
+    "answers_reversed.html": (
+        "{% for answer in answers reversed %}{{ answer.field.label }}={{ answer.value }};{% endfor %}"
+    ),
+    "entries.html": "{% for entry in group.entries %}{% include 'answers.html' with answers=entry %}{% endfor %}",
+    "show_value.html": "[{{ value }}]",
+}
+
+
+@pytest.fixture(scope="module")
+def nested_loop_engine():
+    return Engine(
+        debug=True,
+        loaders=[("django.template.loaders.locmem.Loader", _NESTED_LOOP_TEMPLATES)],
+    )
+
+
+class TestNestedBatchedLoopIsolation:
+    def _groups(self):
+        return _Iterable(
+            [
+                _StageGroup(_Stage("Final Round", "red"), ["entry-a", "entry-b"]),
+                _StageGroup(_Stage("Applied", "blue"), ["entry-c"]),
+            ]
+        )
+
+    def _answers(self):
+        return _ReversibleIterable(
+            [
+                _Answer(_Question("Summary"), "Shared summary text"),
+                _Answer(_Question("Strengths"), "Clear communicator"),
+            ]
+        )
+
+    def _answers_that_cannot_batch(self):
+        return _ReversibleIterable(
+            [
+                _Answer(_Question("Summary"), "Shared summary text"),
+                _AnswerWithoutField(),
+            ]
+        )
+
+    def test_included_unbatched_loop_reads_its_own_items(self, nested_loop_engine):
+        _assert_oxide_matches_django(
+            nested_loop_engine,
+            (
+                "{% for group in groups %}"
+                "<{{ group.stage.name }}|{{ group.entries }}>"
+                "{% include 'answers.html' %}"
+                "{% endfor %}"
+            ),
+            {"groups": self._groups(), "answers": self._answers_that_cannot_batch()},
+        )
+
+    def test_included_reversed_loop_reads_its_own_items(self, nested_loop_engine):
+        _assert_oxide_matches_django(
+            nested_loop_engine,
+            (
+                "{% for group in groups %}"
+                "<{{ group.stage.name }}|{{ group.entries }}>"
+                "{% include 'answers_reversed.html' %}"
+                "{% endfor %}"
+            ),
+            {"groups": self._groups(), "answers": self._answers()},
+        )
+
+    def test_three_levels_across_included_templates(self, nested_loop_engine):
+        groups = _Iterable(
+            [
+                _StageGroup(
+                    _Stage("Final Round", "red"), [self._answers_that_cannot_batch()]
+                ),
+                _StageGroup(_Stage("Applied", "blue"), [self._answers()]),
+            ]
+        )
+        _assert_oxide_matches_django(
+            nested_loop_engine,
+            (
+                "{% for group in groups %}"
+                "{% with rail_color=group.stage.color %}"
+                "<{{ group.stage.name }}|{{ rail_color }}|{{ group.entries|length }}>"
+                "{% include 'entries.html' %}"
+                "{% endwith %}"
+                "{% endfor %}"
+            ),
+            {"groups": groups},
+        )
+
+    def test_unbatched_inner_loop_in_same_template(self, nested_loop_engine):
+        _assert_oxide_matches_django(
+            nested_loop_engine,
+            (
+                "{% for group in groups %}"
+                "<{{ group.stage.name }}|{{ group.entries }}>"
+                "{% for answer in answers reversed %}{{ answer.field.label }}={{ answer.value }};{% endfor %}"
+                "{% endfor %}"
+            ),
+            {"groups": self._groups(), "answers": self._answers()},
+        )
+
+    def test_outer_loopvar_inside_batched_inner_loop(self, nested_loop_engine):
+        _assert_oxide_matches_django(
+            nested_loop_engine,
+            (
+                "{% for group in groups %}"
+                "{% for answer in answers %}"
+                "{{ answer.field.label }}={{ answer.value }}@{{ group.stage.name }};"
+                "{% endfor %}"
+                "{{ group.entries }}"
+                "{% endfor %}"
+            ),
+            {"groups": self._groups(), "answers": self._answers()},
+        )
+
+    def test_outer_loop_keeps_values_after_batched_inner_loop(self, nested_loop_engine):
+        _assert_oxide_matches_django(
+            nested_loop_engine,
+            (
+                "{% for group in groups %}"
+                "{% for answer in answers %}{{ answer.field.label }}={{ answer.value }};{% endfor %}"
+                "<{{ group.stage.name }}|{{ group.entries }}>"
+                "{% endfor %}"
+            ),
+            {"groups": self._groups(), "answers": self._answers()},
+        )
+
+
+class TestStringMethodLookups:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "  padded  ",
+            "   ",
+            "",
+            "plain",
+            mark_safe("  padded  "),
+            mark_safe("   "),
+            mark_safe("<b>x</b>"),
+        ],
+        ids=[
+            "str",
+            "str-blank",
+            "str-empty",
+            "str-plain",
+            "safe",
+            "safe-blank",
+            "safe-markup",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "[{{ s.strip }}]",
+            "[{{ s.upper }}]",
+            "[{{ s.lower }}]",
+            "[{{ s.isdigit }}]",
+            "[{{ s.0 }}]",
+            "[{{ s.missing }}]",
+            "{% if s.strip %}Y{% else %}N{% endif %}",
+            "[{{ s.strip|default:'blank' }}]",
+            "{% with t=s.strip %}[{{ t }}]{% endwith %}",
+        ],
+    )
+    def test_lookup_matches_django(self, engine, src, value):
+        _assert_oxide_matches_django(engine, src, {"s": value})
+
+    def test_method_on_string_inside_list(self, engine):
+        _assert_oxide_matches_django(
+            engine,
+            "[{{ items.0.upper }}|{{ items.1.strip }}]",
+            {"items": ["first", "  second  "]},
+        )
+
+    def test_method_on_string_in_loop(self, engine):
+        _assert_oxide_matches_django(
+            engine,
+            "{% for s in items %}[{{ s.strip }}|{% if s.strip %}Y{% else %}N{% endif %}]{% endfor %}",
+            {"items": ["  a  ", "   ", mark_safe(" b ")]},
+        )
+
+    def test_method_on_dict_value(self, engine):
+        _assert_oxide_matches_django(
+            engine,
+            "[{{ d.name.title }}]",
+            {"d": {"name": "ada lovelace"}},
+        )
+
+    def test_string_if_invalid_names_the_variable(self):
+        invalid_engine = Engine(string_if_invalid="INVALID(%s)")
+        _assert_oxide_matches_django(invalid_engine, "[{{ s.missing }}]", {"s": "text"})
+
+
+class _HasEmptyAttribute:
+    color = ""
+
+
+class TestEmptyStringIsNotMissing:
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "{% with t=s %}[{{ t }}]{% endwith %}",
+            "{% with t=d.k %}[{{ t }}]{% endwith %}",
+            "{% with t=o.color %}[{{ t }}]{% endwith %}",
+            "{% with t=o.color|upper %}[{{ t }}]{% endwith %}",
+            "{% if s == '' %}empty{% else %}other{% endif %}",
+            "{% if o.color == '' %}empty{% else %}other{% endif %}",
+            "{% if s is None %}none{% else %}not-none{% endif %}",
+            "{% firstof missing s 'fallback' %}",
+            "[{{ s|default_if_none:'was-none' }}]",
+            "{% with t=missing %}[{{ t }}]{% endwith %}",
+            "{% if missing is None %}none{% else %}not-none{% endif %}",
+        ],
+    )
+    def test_matches_django(self, engine, src):
+        _assert_oxide_matches_django(
+            engine, src, {"s": "", "d": {"k": ""}, "o": _HasEmptyAttribute()}
+        )
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "{% with t=s %}[{{ t }}]{% endwith %}",
+            "{% with t=missing %}[{{ t }}]{% endwith %}",
+            "[{{ missing|default:'d' }}]",
+            "[{{ missing.attr|upper }}]",
+            "{% if s == '' %}empty{% else %}other{% endif %}",
+        ],
+    )
+    def test_matches_django_with_string_if_invalid(self, src):
+        invalid_engine = Engine(string_if_invalid="INVALID(%s)")
+        _assert_oxide_matches_django(invalid_engine, src, {"s": ""})
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "{% include 'show_value.html' with value=s %}",
+            "{% include 'show_value.html' with value=missing %}",
+            "{% include 'show_value.html' with value=o.color only %}",
+            "{% include 'show_value.html' with value=missing only %}",
+        ],
+    )
+    def test_include_with_matches_django(self, nested_loop_engine, src):
+        _assert_oxide_matches_django(
+            nested_loop_engine, src, {"s": "", "o": _HasEmptyAttribute()}
+        )

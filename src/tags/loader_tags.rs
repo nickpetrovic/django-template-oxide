@@ -1070,7 +1070,9 @@ impl Node for IncludeNode {
                                     // Found! Use this directly with extra context below
                                     let mut extra: HashMap<String, Value> = HashMap::new();
                                     for (key, expr) in &self.extra_context {
-                                        let value = super::resolve_if_value(py, expr, context);
+                                        let value = crate::nodes::resolve_expression_rust(
+                                            py, expr, context,
+                                        )?;
                                         extra.insert(key.clone(), value);
                                     }
                                     if self.isolated_context {
@@ -1130,8 +1132,7 @@ impl Node for IncludeNode {
 
         let mut extra: HashMap<String, Value> = HashMap::new();
         for (key, expr) in &self.extra_context {
-            // Use the full expression resolver that applies filters
-            let value = super::resolve_if_value(py, expr, context);
+            let value = crate::nodes::resolve_expression_rust(py, expr, context)?;
             extra.insert(key.clone(), value);
         }
 
