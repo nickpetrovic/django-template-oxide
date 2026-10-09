@@ -8,7 +8,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use crate::context::{self as ctx, Value};
-use crate::filters::get_default_filters;
 use crate::template;
 
 fn pydict_to_context_dict(dict: Option<&Bound<'_, PyAny>>) -> PyResult<Option<ctx::ContextDict>> {
@@ -58,15 +57,15 @@ pub struct PyContext {
 
 #[pymethods]
 impl PyContext {
-    /// `Context(dict_=None, autoescape=True, use_l10n=None, use_tz=None, string_if_invalid=None)`.
     #[new]
-    #[pyo3(signature = (dict_=None, /, autoescape=true, use_l10n=None, use_tz=None, string_if_invalid=None))]
+    #[pyo3(signature = (dict_=None, /, autoescape=true, use_l10n=None, use_tz=None, string_if_invalid=None, request=None))]
     fn new(
         dict_: Option<&Bound<'_, PyAny>>,
         autoescape: bool,
         use_l10n: Option<bool>,
         use_tz: Option<bool>,
         string_if_invalid: Option<String>,
+        request: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let values = pydict_to_context_dict(dict_)?;
         let mut inner = ctx::Context::new(values);
@@ -74,6 +73,9 @@ impl PyContext {
         inner.use_l10n = use_l10n;
         inner.use_tz = use_tz;
         inner.string_if_invalid = string_if_invalid.unwrap_or_default();
+        inner.request = request
+            .filter(|request| !request.is_none())
+            .map(|request| request.clone().unbind());
         Ok(PyContext { inner })
     }
 
@@ -88,6 +90,11 @@ impl PyContext {
     /// `__getattr__` only fires on missed lookups so it can't shadow
     /// pyclass methods.
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        if name == "request"
+            && let Some(request) = &self.inner.request
+        {
+            return Ok(request.clone_ref(py));
+        }
         match self.inner.get(name) {
             Some(v) => Ok(v.to_pyobject(py)),
             None => Err(pyo3::exceptions::PyAttributeError::new_err(format!(
@@ -696,6 +703,7 @@ pub struct PyTemplate {
     inner: template::Template,
     origin_value: Option<Py<PyAny>>,
     engine_value: Option<Py<PyAny>>,
+    autoescape: bool,
 }
 
 #[pymethods]
@@ -765,10 +773,21 @@ impl PyTemplate {
             }
         })?;
 
+        let autoescape = engine
+            .as_ref()
+            .and_then(|engine| {
+                engine
+                    .bind(py)
+                    .getattr(pyo3::intern!(py, "autoescape"))
+                    .ok()
+            })
+            .and_then(|value| value.is_truthy().ok())
+            .unwrap_or(true);
         Ok(PyTemplate {
             inner,
             origin_value: origin,
             engine_value: engine,
+            autoescape,
         })
     }
 
@@ -780,10 +799,13 @@ impl PyTemplate {
     ) -> PyResult<String> {
         let _g_entry = crate::prof::Guard::new("PyTemplate::render:entry");
         let this = slf.borrow();
+        let engine_autoescape = || this.autoescape;
         let mut rust_context = match context {
             Some(obj) => {
                 if obj.is_none() {
-                    ctx::Context::new(None)
+                    let mut ctx = ctx::Context::new(None);
+                    ctx.autoescape = engine_autoescape();
+                    ctx
                 } else if let Ok(pyctx) = obj.cast::<PyContext>() {
                     let _g = crate::prof::Guard::new("PyTemplate::render:from_PyContext");
                     // Clone, but we'll write mutations back after render.
@@ -794,7 +816,9 @@ impl PyTemplate {
                     for (k, v) in d.iter() {
                         pairs.push((k.extract()?, Value::from(&v)));
                     }
-                    ctx::Context::from_pairs(pairs)
+                    let mut ctx = ctx::Context::from_pairs(pairs);
+                    ctx.autoescape = engine_autoescape();
+                    ctx
                 } else if obj.hasattr(pyo3::intern!(py, "flatten")).unwrap_or(false)
                     && obj
                         .hasattr(pyo3::intern!(py, "autoescape"))
@@ -820,6 +844,11 @@ impl PyTemplate {
                     if let Ok(use_tz) = obj.getattr(pyo3::intern!(py, "use_tz")) {
                         ctx.use_tz = use_tz.extract::<Option<bool>>().ok().flatten();
                     }
+                    ctx.request = obj
+                        .getattr(pyo3::intern!(py, "request"))
+                        .ok()
+                        .filter(|request| !request.is_none())
+                        .map(Bound::unbind);
                     ctx
                 } else {
                     return Err(PyRuntimeError::new_err(
@@ -827,7 +856,11 @@ impl PyTemplate {
                     ));
                 }
             }
-            None => ctx::Context::new(None),
+            None => {
+                let mut ctx = ctx::Context::new(None);
+                ctx.autoescape = engine_autoescape();
+                ctx
+            }
         };
 
         // Propagate string_if_invalid from the template to the context
@@ -868,8 +901,10 @@ impl PyTemplate {
             }
         }
 
+        crate::filters::reset_locale_snapshot();
         let result: Result<String, crate::errors::TemplateError> =
             this.inner.render(py, &mut rust_context);
+        crate::filters::invalidate_locale_snapshot();
 
         if !already_bound {
             rust_context.template = None;
@@ -887,6 +922,17 @@ impl PyTemplate {
         }
 
         result.map_err(|e| -> PyErr { e.into() })
+    }
+
+    #[pyo3(signature = (context=None))]
+    fn render_safe(
+        slf: Bound<'_, Self>,
+        context: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let rendered = Self::render(slf, context, py)?;
+        let dj = crate::python_cache::django(py)?;
+        Ok(dj.safe_string_cls.bind(py).call1((rendered,))?.unbind())
     }
 
     #[getter]
@@ -1009,6 +1055,7 @@ impl PyEngine {
             inner,
             origin_value: None,
             engine_value: Some(engine_dict.into_any().unbind()),
+            autoescape: self.autoescape,
         })
     }
 
@@ -1093,116 +1140,17 @@ fn render_to_string(
         .map_err(|e| -> PyErr { e.into() })
 }
 
-/// Python callable wrapping a native Rust filter, so the parser /
-/// `FilterExpression` can call native and user filters uniformly.
-#[pyclass(name = "NativeFilterWrapper", module = "django_template_oxide._rust")]
-pub struct NativeFilterWrapper {
-    name: String,
-    func: fn(&Value, &[Value], bool) -> Value,
-    #[pyo3(get)]
-    is_safe: bool,
-    #[pyo3(get)]
-    needs_autoescape: bool,
-    #[pyo3(get)]
-    expects_localtime: bool,
-}
-
-#[pymethods]
-impl NativeFilterWrapper {
-    #[pyo3(signature = (value, *args, autoescape=None))]
-    fn __call__(
-        &self,
-        value: &Bound<'_, PyAny>,
-        args: &Bound<'_, PyTuple>,
-        autoescape: Option<bool>,
-    ) -> PyResult<Py<PyAny>> {
-        let py = value.py();
-        let rust_value = py_to_value(py, value);
-        let mut rust_args: Vec<Value> = Vec::with_capacity(args.len());
-        for i in 0..args.len() {
-            let arg = args.get_item(i)?;
-            rust_args.push(py_to_value(py, &arg));
-        }
-        let ae = autoescape.unwrap_or(false);
-        let result = (self.func)(&rust_value, &rust_args, ae);
-        Ok(value_to_py(py, &result))
-    }
-
-    fn __repr__(&self) -> String {
-        format!("<NativeFilterWrapper '{}'>", self.name)
-    }
-}
-
-/// Python -> `Value`, preserving SafeData.
-fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Value {
-    let is_safe = py
-        .import("django.utils.safestring")
-        .and_then(|m| m.getattr("SafeData"))
-        .and_then(|cls| obj.is_instance(&cls))
-        .unwrap_or(false);
-
-    let mut val = Value::from(obj);
-
-    if is_safe && let Value::String(s) = val {
-        val = Value::SafeString(s.into());
-    }
-
-    val
-}
-
-/// Convert a Rust `Value` to a Python object, preserving safe-string status.
-fn value_to_py(py: Python<'_>, val: &Value) -> Py<PyAny> {
-    match val {
-        Value::SafeString(s) => {
-            // Wrap in mark_safe to preserve safety through the filter chain.
-            if let Ok(mark_safe) = py
-                .import("django.utils.safestring")
-                .and_then(|m| m.getattr("mark_safe"))
-            {
-                let s_ref: &str = s;
-                if let Ok(result) = mark_safe.call1((s_ref,)) {
-                    return result.unbind();
-                }
-            }
-            // Fallback: return as a plain string.
-            let s_ref: &str = s;
-            s_ref.into_pyobject(py).unwrap().into_any().unbind()
-        }
-        _ => val.to_pyobject(py),
-    }
-}
-
-/// Filters delegated to Django's Python implementations.
-const PYTHON_DELEGATED_FILTERS: &[&str] = &["date", "time", "timesince", "timeuntil"];
-
-/// Register native filters as `NativeFilterWrapper`s on the parser.
-/// Date/time filters route to `django.template.defaultfilters` instead.
 pub fn register_default_filters(py: Python<'_>, parser: &mut crate::parser::Parser) {
-    let native_filters = get_default_filters();
-
-    let django_filters = py.import("django.template.defaultfilters").ok();
-
-    for (name, native_filter) in native_filters {
-        if PYTHON_DELEGATED_FILTERS.contains(&name.as_str())
-            && let Some(ref df_module) = django_filters
-            && let Ok(py_filter) = df_module.getattr(name.as_str())
-        {
-            parser.filters.insert(name.clone(), py_filter.unbind());
-            continue;
+    let Ok(dj) = crate::python_cache::django(py) else {
+        return;
+    };
+    let Ok(filters) = dj.builtin_filters.bind(py).cast::<PyDict>() else {
+        return;
+    };
+    for (name, func) in filters.iter() {
+        if let Ok(name) = name.extract::<String>() {
+            parser.filters.insert(name, func.unbind());
         }
-        // Django not available: fall through to the Rust stub.
-
-        let wrapper = NativeFilterWrapper {
-            name: name.clone(),
-            func: native_filter.func,
-            is_safe: native_filter.is_safe,
-            needs_autoescape: native_filter.needs_autoescape,
-            expects_localtime: native_filter.expects_localtime,
-        };
-
-        let py_wrapper = Py::new(py, wrapper).expect("Failed to create NativeFilterWrapper");
-
-        parser.filters.insert(name.clone(), py_wrapper.into_any());
     }
 }
 
@@ -1215,7 +1163,6 @@ pub fn register(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_class::<PyRenderContextState>()?;
     m.add_class::<PyTemplate>()?;
     m.add_class::<PyEngine>()?;
-    m.add_class::<NativeFilterWrapper>()?;
     m.add_function(wrap_pyfunction!(render_to_string, m)?)?;
     Ok(())
 }

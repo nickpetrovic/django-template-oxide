@@ -150,27 +150,7 @@ impl Parser {
                         .compile_filter(&token.contents)
                         .map_err(|e| self.error(&token, e))?;
 
-                    // Resolve each filter's Python callable; placeholder
-                    // `None` for native-only filters (renderer detects).
-                    let filter_funcs: Vec<Py<PyAny>> = if filter_expression.filters.is_empty() {
-                        Vec::new()
-                    } else {
-                        pyo3::Python::attach(|py| {
-                            filter_expression
-                                .filters
-                                .iter()
-                                .map(|pf| match self.filters.get(&pf.name) {
-                                    Some(f) => f.clone_ref(py),
-                                    None => py.None(),
-                                })
-                                .collect()
-                        })
-                    };
-
-                    let mut node =
-                        Box::new(VariableNode::with_filters(filter_expression, filter_funcs));
-                    // Inline extend_nodelist's metadata to keep the
-                    // concrete `Box<VariableNode>` for `push_variable`.
+                    let mut node = Box::new(VariableNode::new(filter_expression));
                     node.set_token(token.clone());
                     if let Some(ref origin) = self.origin {
                         node.set_origin(origin.clone());
@@ -359,23 +339,34 @@ impl Parser {
     pub fn compile_filter(&self, token: &str) -> Result<FilterExpression, TemplateError> {
         let mut fe = FilterExpression::parse(token, |filter_name| self.find_filter(filter_name))?;
 
-        // Resolve Python filter callables once at parse time so every
-        // consumer (with, if-arms, for-in, url, etc.) sees the right
-        // function. Without this, Python-registered filters silently
-        // turn into Value::None in tag args via `resolve_if_value`.
         if !fe.filters.is_empty() {
-            let funcs: Vec<pyo3::Py<pyo3::PyAny>> = pyo3::Python::attach(|py| {
-                fe.filters
-                    .iter()
-                    .map(|pf| match self.filters.get(&pf.name) {
-                        Some(f) => f.clone_ref(py),
-                        // Placeholder for native-Rust-only filters; the
-                        // renderer only consults filter_funcs on a miss.
-                        None => py.None(),
-                    })
-                    .collect()
-            });
+            let (funcs, natives) = pyo3::Python::attach(|py| -> Result<_, TemplateError> {
+                let mut funcs = Vec::with_capacity(fe.filters.len());
+                let mut natives = Vec::with_capacity(fe.filters.len());
+                for pf in &fe.filters {
+                    let func = self
+                        .filters
+                        .get(&pf.name)
+                        .map(|f| f.bind(py).clone())
+                        .ok_or_else(|| {
+                            TemplateError::TemplateSyntaxError(format!(
+                                "Invalid filter: '{}'",
+                                pf.name
+                            ))
+                        })?;
+                    crate::filters::check_filter_args(py, &pf.name, &func, pf.args.len())?;
+                    natives.push(crate::filters::native_for(
+                        py,
+                        &pf.name,
+                        &func,
+                        pf.args.len(),
+                    ));
+                    funcs.push(func.unbind());
+                }
+                Ok((funcs, natives))
+            })?;
             fe.filter_funcs = std::sync::Arc::new(funcs);
+            fe.natives = std::sync::Arc::new(natives);
         }
 
         Ok(fe)

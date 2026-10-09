@@ -205,9 +205,7 @@ impl Node for PyOpaqueNode {
     crate::impl_node_metadata!();
 
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        // Swap the Rust Context into a PyContext for the call so the
-        // Python node's `context['x'] = 1` mutations remain visible.
-        render_with_borrowed_context(py, context, |py_ctx_bound| {
+        let rendered = render_with_borrowed_context(py, context, |py_ctx_bound| {
             // Prefer `render_annotated`; fall back to `render`.
             let method_name = intern!(py, "render_annotated");
             let result = match self
@@ -232,8 +230,9 @@ impl Node for PyOpaqueNode {
                 )
             })?;
             Ok(result_pystr.to_str()?.to_owned())
-        })
-        .map_err(TemplateError::from)
+        });
+        crate::filters::invalidate_locale_snapshot();
+        rendered.map_err(TemplateError::from)
     }
 
     fn child_nodelists(&self) -> &[&str] {
@@ -254,13 +253,12 @@ pub struct PyNodeList {
     pub inner: NodeList,
 }
 
-#[pymethods]
 impl PyNodeList {
-    /// Render all child nodes and return a `SafeString`. Accepts our
-    /// `PyContext` (zero-copy) or a Django `Context` (flattened to a
-    /// fresh Rust Context inheriting `autoescape`/`use_l10n`/`use_tz`;
-    /// mutations don't propagate back).
-    fn render(&self, py: Python<'_>, context: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn render_inner(
+        &self,
+        py: Python<'_>,
+        context: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::utils::SafeString> {
         let rendered = if let Ok(py_ctx) = context.cast::<crate::py_bindings::PyContext>() {
             let mut borrowed = py_ctx.borrow_mut();
             self.inner
@@ -287,18 +285,33 @@ impl PyNodeList {
             if let Ok(tz) = context.getattr(intern!(py, "use_tz")) {
                 rust_ctx.use_tz = tz.extract::<Option<bool>>().ok().flatten();
             }
+            rust_ctx.request = context
+                .getattr(intern!(py, "request"))
+                .ok()
+                .filter(|request| !request.is_none())
+                .map(Bound::unbind);
             self.inner
                 .render(py, &mut rust_ctx)
                 .map_err(<PyErr as From<TemplateError>>::from)?
         };
 
-        // mark_safe on a Python str to match Django's contract.
-        let s = rendered.as_str();
-        let mark_safe = py
-            .import("django.utils.safestring")?
-            .getattr(intern!(py, "mark_safe"))?;
-        let py_str = pyo3::types::PyString::new(py, s);
-        Ok(mark_safe.call1((py_str,))?.unbind())
+        Ok(rendered)
+    }
+}
+
+#[pymethods]
+impl PyNodeList {
+    fn render(&self, py: Python<'_>, context: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        crate::filters::reset_locale_snapshot();
+        let rendered = self.render_inner(py, context);
+        crate::filters::invalidate_locale_snapshot();
+        let rendered = rendered?;
+        let dj = crate::python_cache::django(py)?;
+        Ok(dj
+            .safe_string_cls
+            .bind(py)
+            .call1((rendered.as_str(),))?
+            .unbind())
     }
 
     fn __len__(&self) -> usize {
@@ -526,8 +539,6 @@ impl PyParser {
         Ok(dict.unbind())
     }
 
-    /// All filters as Python callables (built-ins are wrapped in
-    /// `NativeFilterWrapper`). Mirrors `Parser.filters`.
     #[getter]
     fn filters(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
         let parser = self.parser();

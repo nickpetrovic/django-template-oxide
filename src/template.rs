@@ -108,12 +108,17 @@ impl Template {
         crate::tags::register_default_tags(&mut parser);
 
         Python::attach(|py| -> Result<(), TemplateError> {
-            py_bindings::register_default_filters(py, &mut parser);
+            let engine_builtins = engine.and_then(|engine_obj| {
+                engine_obj
+                    .getattr(pyo3::intern!(py, "template_builtins"))
+                    .ok()
+            });
+            if engine_builtins.is_none() {
+                py_bindings::register_default_filters(py, &mut parser);
+            }
 
-            // engine.template_builtins is a list[Library]; register
-            // each so `{% cotton %}` etc. are visible during parsing.
             if let Some(engine_obj) = engine {
-                if let Ok(builtins) = engine_obj.getattr(pyo3::intern!(py, "template_builtins"))
+                if let Some(builtins) = engine_builtins
                     && let Ok(iter) = builtins.try_iter()
                 {
                     for lib in iter.flatten() {

@@ -44,6 +44,62 @@ impl Value {
             _ => None,
         }
     }
+
+    #[inline]
+    pub fn python_str(&self) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
+        match self {
+            Value::None => Some(Cow::Borrowed("None")),
+            Value::Bool(true) => Some(Cow::Borrowed("True")),
+            Value::Bool(false) => Some(Cow::Borrowed("False")),
+            Value::Int(n) => Some(Cow::Owned(n.to_string())),
+            Value::Float(f) => Some(Cow::Owned(python_float_repr(*f))),
+            Value::String(s) => Some(Cow::Borrowed(s.as_str())),
+            Value::SafeString(s) => Some(Cow::Borrowed(s.as_ref())),
+            Value::List(_) | Value::Dict(_) | Value::PyObject(_) => None,
+        }
+    }
+}
+
+pub fn python_float_repr(x: f64) -> String {
+    if x.is_nan() {
+        return "nan".to_owned();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "inf" } else { "-inf" }.to_owned();
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() { "-0.0" } else { "0.0" }.to_owned();
+    }
+    let scientific = format!("{:e}", x.abs());
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("LowerExp output always contains an exponent");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("LowerExp exponent is a decimal integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let decimal_point = exponent + 1;
+    let body = if decimal_point <= -4 || decimal_point > 16 {
+        let mut out = digits[..1].to_owned();
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        let sign = if exponent < 0 { '-' } else { '+' };
+        format!("{out}e{sign}{:02}", exponent.abs())
+    } else if decimal_point <= 0 {
+        format!("0.{}{digits}", "0".repeat((-decimal_point) as usize))
+    } else if decimal_point as usize >= digits.len() {
+        format!(
+            "{digits}{}.0",
+            "0".repeat(decimal_point as usize - digits.len())
+        )
+    } else {
+        let split = decimal_point as usize;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if x < 0.0 { format!("-{body}") } else { body }
 }
 
 /// `String` -> `Arc<str>` for `Value::SafeString`. One copy now;
@@ -82,7 +138,7 @@ impl fmt::Display for Value {
             Value::Bool(true) => write!(f, "True"),
             Value::Bool(false) => write!(f, "False"),
             Value::Int(n) => write!(f, "{n}"),
-            Value::Float(n) => write!(f, "{n}"),
+            Value::Float(n) => f.write_str(&python_float_repr(*n)),
             Value::String(s) => write!(f, "{s}"),
             Value::SafeString(s) => f.write_str(s),
             Value::List(_) | Value::Dict(_) => {
@@ -180,6 +236,7 @@ impl<'py> From<&Bound<'py, PyAny>> for Value {
         }
         if obj.is_exact_instance_of::<PyFloat>()
             && let Ok(v) = obj.extract::<f64>()
+            && !v.is_nan()
         {
             return Value::Float(v);
         }
@@ -197,60 +254,11 @@ impl<'py> From<&Bound<'py, PyAny>> for Value {
             return Value::PyObject(obj.clone().unbind());
         }
 
-        // Slow path: SafeString, gettext_lazy, model instances, etc.
-
-        let is_safe = obj.getattr("__html__").is_ok();
-
-        if let Ok(s) = obj.cast::<PyString>()
-            && let Ok(v) = s.extract::<String>()
+        if let Ok(dj) = crate::python_cache::django(obj.py())
+            && obj.get_type().is(dj.safe_string_cls.bind(obj.py()))
+            && let Ok(v) = obj.extract::<String>()
         {
-            if is_safe {
-                return Value::SafeString(std::sync::Arc::from(v));
-            }
-            return Value::String(v);
-        }
-
-        if let Ok(b) = obj.cast::<PyBool>() {
-            return Value::Bool(b.is_true());
-        }
-        if let Ok(i) = obj.cast::<PyInt>()
-            && let Ok(v) = i.extract::<i64>()
-        {
-            return Value::Int(v);
-        }
-        if let Ok(f) = obj.cast::<PyFloat>()
-            && let Ok(v) = f.extract::<f64>()
-        {
-            return Value::Float(v);
-        }
-
-        // Dict/list/tuple subclasses stay lazy.
-        if obj.is_instance_of::<PyList>()
-            || obj.is_instance_of::<PyTuple>()
-            || obj.is_instance_of::<PyDict>()
-        {
-            return Value::PyObject(obj.clone().unbind());
-        }
-
-        // Django lazy strings (Promise): have __str__ but aren't PyString.
-        let is_promise = obj
-            .py()
-            .import("django.utils.functional")
-            .and_then(|m| m.getattr("Promise"))
-            .and_then(|cls| obj.is_instance(&cls))
-            .unwrap_or(false);
-
-        if is_promise
-            && let Ok(s) = obj.str()
-            && let Ok(v) = s.extract::<String>()
-        {
-            // Re-check __html__ on the resolved string (gettext_lazy
-            // may wrap SafeData transparently).
-            let resolved_safe = is_safe || s.as_any().getattr("__html__").is_ok();
-            if resolved_safe {
-                return Value::SafeString(std::sync::Arc::from(v));
-            }
-            return Value::String(v);
+            return Value::SafeString(std::sync::Arc::from(v));
         }
 
         Value::PyObject(obj.clone().unbind())
@@ -267,12 +275,9 @@ impl Value {
             Value::Float(n) => n.into_pyobject(py).unwrap().into_any().unbind(),
             Value::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
             Value::SafeString(s) => {
-                // mark_safe so SafeData status survives the round-trip.
                 let as_str: &str = s.as_ref();
-                if let Ok(mark_safe) = py
-                    .import("django.utils.safestring")
-                    .and_then(|m| m.getattr("mark_safe"))
-                    && let Ok(result) = mark_safe.call1((as_str,))
+                if let Ok(dj) = crate::python_cache::django(py)
+                    && let Ok(result) = dj.safe_string_cls.bind(py).call1((as_str,))
                 {
                     return result.unbind();
                 }
@@ -617,6 +622,42 @@ pub struct Context {
     /// Engine debug flag. When true, `VariableDoesNotExist` is raised
     /// instead of silently substituting `string_if_invalid`.
     pub debug: bool,
+    pub use_thousand_separator: LazySetting,
+    pub request: Option<Py<PyAny>>,
+}
+
+#[derive(Debug, Default)]
+pub struct LazySetting(std::sync::atomic::AtomicU8);
+
+impl Clone for LazySetting {
+    fn clone(&self) -> Self {
+        Self(std::sync::atomic::AtomicU8::new(
+            self.0.load(std::sync::atomic::Ordering::Relaxed),
+        ))
+    }
+}
+
+impl LazySetting {
+    const DISABLED: u8 = 1;
+    const ENABLED: u8 = 2;
+
+    pub fn get_or_load(&self, load: impl FnOnce() -> bool) -> bool {
+        use std::sync::atomic::Ordering;
+        match self.0.load(Ordering::Relaxed) {
+            Self::DISABLED => false,
+            Self::ENABLED => true,
+            _ => {
+                let enabled = load();
+                let state = if enabled {
+                    Self::ENABLED
+                } else {
+                    Self::DISABLED
+                };
+                self.0.store(state, Ordering::Relaxed);
+                enabled
+            }
+        }
+    }
 }
 
 /// Per-iteration cache populated by ForNode when its body has a
@@ -653,7 +694,30 @@ impl Context {
             block_context: None,
             engine: None,
             debug: false,
+            use_thousand_separator: LazySetting::default(),
+            request: None,
         }
+    }
+
+    #[inline]
+    pub fn renders_integers_natively(&self) -> bool {
+        if self.use_l10n == Some(false) {
+            return true;
+        }
+        !self.use_thousand_separator.get_or_load(|| {
+            Python::attach(|py| {
+                crate::python_cache::django(py)
+                    .ok()
+                    .and_then(|dj| {
+                        dj.settings
+                            .bind(py)
+                            .getattr(pyo3::intern!(py, "USE_THOUSAND_SEPARATOR"))
+                            .ok()
+                    })
+                    .and_then(|value| value.is_truthy().ok())
+                    .unwrap_or(false)
+            })
+        })
     }
 
     pub fn from_pairs<I>(pairs: I) -> Self
@@ -759,6 +823,8 @@ impl Context {
             block_context: None,
             engine: self.engine.clone(),
             debug: self.debug,
+            use_thousand_separator: self.use_thousand_separator.clone(),
+            request: self.request.clone(),
         }
     }
 

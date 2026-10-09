@@ -15,9 +15,12 @@ use crate::variable::FilterExpression;
 #[allow(unused_imports)]
 use crate::impl_node_metadata;
 
-fn resolve_expr(py: Python<'_>, fe: &FilterExpression, context: &mut Context) -> Value {
+fn resolve_expr(
+    py: Python<'_>,
+    fe: &FilterExpression,
+    context: &Context,
+) -> Result<Value, TemplateError> {
     crate::nodes::resolve_expression_rust(py, fe, context)
-        .unwrap_or_else(|_| Value::String(String::new()))
 }
 
 // {% translate %} / {% trans %}
@@ -43,7 +46,7 @@ impl Node for TranslateNode {
             crate::variable::FilterExpressionVar::Var(var) => {
                 var.translate = !self.noop;
                 if let Some(ref ctx_expr) = self.message_context {
-                    let ctx_val = resolve_expr(py, ctx_expr, context);
+                    let ctx_val = resolve_expr(py, ctx_expr, context)?;
                     var.message_context = Some(ctx_val.to_string());
                 }
             }
@@ -63,17 +66,17 @@ impl Node for TranslateNode {
                     let msgid = msg.replace('%', "%%");
 
                     let translated = if let Some(ctx_expr) = &self.message_context {
-                        let ctx_val = resolve_expr(py, ctx_expr, context);
+                        let ctx_val = resolve_expr(py, ctx_expr, context)?;
                         let ctx_str = ctx_val.to_string();
                         translation
-                            .call_method1("pgettext", (ctx_str.as_str(), msgid.as_str()))
-                            .and_then(|r| r.extract::<String>())
-                            .unwrap_or_else(|_| msg.clone())
+                            .call_method1("pgettext", (ctx_str.as_str(), msgid.as_str()))?
+                            .str()?
+                            .to_string()
                     } else {
                         translation
-                            .call_method1("gettext", (msgid.as_str(),))
-                            .and_then(|r| r.extract::<String>())
-                            .unwrap_or_else(|_| msg.clone())
+                            .call_method1("gettext", (msgid.as_str(),))?
+                            .str()?
+                            .to_string()
                     };
 
                     fe.var = crate::variable::FilterExpressionVar::Constant(Some(translated));
@@ -81,8 +84,7 @@ impl Node for TranslateNode {
             }
         }
 
-        let mut output = crate::nodes::resolve_expression_rust(py, &fe, context)
-            .unwrap_or_else(|_| Value::String(String::new()));
+        let mut output = crate::nodes::resolve_expression_rust(py, &fe, context)?;
 
         // Translated constants need autoescape (user-facing text);
         // Variable inputs keep their existing safe status.
@@ -97,7 +99,7 @@ impl Node for TranslateNode {
             output = Value::String(s.to_string());
         }
 
-        let mut value = crate::nodes::render_value_in_context(&output, context);
+        let mut value = crate::nodes::render_value_in_context(&output, context)?;
 
         // Unescape Django's source-level `%%`.
         value = value.replace("%%", "%");
@@ -200,14 +202,14 @@ impl Node for BlockTranslateNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
         let mut extra_values: HashMap<String, Value> = HashMap::new();
         for (name, fe) in &self.extra_context {
-            let val = resolve_expr(py, fe, context);
+            let val = resolve_expr(py, fe, context)?;
             extra_values.insert(name.clone(), val);
         }
 
         if let Some(ref countervar) = self.countervar
             && let Some(ref counter_expr) = self.counter
         {
-            let count_val = resolve_expr(py, counter_expr, context);
+            let count_val = resolve_expr(py, counter_expr, context)?;
             extra_values.insert(countervar.clone(), count_val);
         }
 
@@ -263,42 +265,39 @@ impl Node for BlockTranslateNode {
             };
 
             if let Some(ref ctx_expr) = self.message_context {
-                let ctx_val = resolve_expr(py, ctx_expr, context);
+                let ctx_val = resolve_expr(py, ctx_expr, context)?;
                 let ctx_str = ctx_val.to_string();
                 let npgettext = translation
                     .getattr("npgettext")
                     .map_err(|e| TemplateError::Internal(format!("Cannot get npgettext: {e}")))?;
-                let result = npgettext
-                    .call1((ctx_str.as_str(), msgid.as_str(), plural_msg.as_str(), count))
-                    .map_err(|e| TemplateError::Internal(format!("npgettext failed: {e}")))?;
+                let result = npgettext.call1((
+                    ctx_str.as_str(),
+                    msgid.as_str(),
+                    plural_msg.as_str(),
+                    count,
+                ))?;
                 result.extract::<String>().unwrap_or_else(|_| msgid.clone())
             } else {
                 let ngettext = translation
                     .getattr("ngettext")
                     .map_err(|e| TemplateError::Internal(format!("Cannot get ngettext: {e}")))?;
-                let result = ngettext
-                    .call1((msgid.as_str(), plural_msg.as_str(), count))
-                    .map_err(|e| TemplateError::Internal(format!("ngettext failed: {e}")))?;
+                let result = ngettext.call1((msgid.as_str(), plural_msg.as_str(), count))?;
                 result.extract::<String>().unwrap_or_else(|_| msgid.clone())
             }
         } else {
             if let Some(ref ctx_expr) = self.message_context {
-                let ctx_val = resolve_expr(py, ctx_expr, context);
+                let ctx_val = resolve_expr(py, ctx_expr, context)?;
                 let ctx_str = ctx_val.to_string();
                 let pgettext = translation
                     .getattr("pgettext")
                     .map_err(|e| TemplateError::Internal(format!("Cannot get pgettext: {e}")))?;
-                let result = pgettext
-                    .call1((ctx_str.as_str(), msgid.as_str()))
-                    .map_err(|e| TemplateError::Internal(format!("pgettext failed: {e}")))?;
+                let result = pgettext.call1((ctx_str.as_str(), msgid.as_str()))?;
                 result.extract::<String>().unwrap_or_else(|_| msgid.clone())
             } else {
                 let gettext = translation
                     .getattr("gettext")
                     .map_err(|e| TemplateError::Internal(format!("Cannot get gettext: {e}")))?;
-                let result = gettext
-                    .call1((msgid.as_str(),))
-                    .map_err(|e| TemplateError::Internal(format!("gettext failed: {e}")))?;
+                let result = gettext.call1((msgid.as_str(),))?;
                 result.extract::<String>().unwrap_or_else(|_| msgid.clone())
             }
         };
@@ -318,14 +317,13 @@ impl Node for BlockTranslateNode {
         let mut data: HashMap<String, String> = HashMap::new();
         for var_name in &all_vars {
             let val = match context.get(var_name) {
-                Some(v) => crate::nodes::render_value_in_context(&v.clone(), context),
+                Some(v) => crate::nodes::render_value_in_context(&v.clone(), context)?,
                 None => context.string_if_invalid.clone(),
             };
             data.insert(var_name.clone(), val);
         }
 
-        // Mirrors Django's `result %= data`.
-        let result = interpolate_message_with_data(&translated, &data, context);
+        let result = interpolate_message_with_data(&translated, &data, context)?;
 
         context.pop();
 
@@ -389,7 +387,7 @@ fn interpolate_message_with_data(
     msg: &str,
     data: &HashMap<String, String>,
     context: &Context,
-) -> String {
+) -> Result<String, TemplateError> {
     let mut result = String::with_capacity(msg.len());
     let mut chars = msg.chars().peekable();
 
@@ -417,7 +415,7 @@ fn interpolate_message_with_data(
                     result.push_str(&crate::nodes::render_value_in_context(
                         &val.clone(),
                         context,
-                    ));
+                    )?);
                 } else {
                     // Django catches the KeyError and falls back; keep
                     // the placeholder text.
@@ -435,7 +433,7 @@ fn interpolate_message_with_data(
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// `trimmed` option: strip each line and join with single spaces.
@@ -597,43 +595,21 @@ struct LanguageNode {
 
 impl Node for LanguageNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let code_val = resolve_expr(py, &self.language_code, context);
-        let code_str = code_val.to_string();
-
-        let translation = py
-            .import("django.utils.translation")
-            .map_err(|e| TemplateError::Internal(format!("Cannot import translation: {e}")))?;
-
-        // Get the current language to restore later.
-        let get_language = translation
-            .getattr("get_language")
-            .map_err(|e| TemplateError::Internal(format!("Cannot get get_language: {e}")))?;
-        let old_language = get_language
-            .call0()
-            .map_err(|e| TemplateError::Internal(format!("get_language() failed: {e}")))?;
-
-        // Activate the new language.
-        let activate = translation
-            .getattr("activate")
-            .map_err(|e| TemplateError::Internal(format!("Cannot get activate: {e}")))?;
-        activate
-            .call1((code_str.as_str(),))
-            .map_err(|e| TemplateError::Internal(format!("activate() failed: {e}")))?;
-
-        // Render the body.
+        let code_val = resolve_expr(py, &self.language_code, context)?;
+        let translation = py.import("django.utils.translation")?;
+        let override_language = translation
+            .getattr("override")?
+            .call1((code_val.to_pyobject(py),))?;
+        override_language.call_method0(pyo3::intern!(py, "__enter__"))?;
+        crate::filters::invalidate_locale_snapshot();
         let result = self.nodelist.render(py, context);
-
-        // Restore the old language.
-        if old_language.is_none() {
-            let deactivate = translation
-                .getattr("deactivate_all")
-                .map_err(|e| TemplateError::Internal(format!("Cannot get deactivate_all: {e}")))?;
-            let _ = deactivate.call0();
-        } else {
-            let _ = activate.call1((&old_language,));
-        }
-
-        result.map(|safe| safe.as_str().to_owned())
+        let none = py.None();
+        let restored =
+            override_language.call_method1(pyo3::intern!(py, "__exit__"), (&none, &none, &none));
+        crate::filters::invalidate_locale_snapshot();
+        let rendered = result?;
+        restored?;
+        Ok(rendered.as_str().to_owned())
     }
 
     impl_node_metadata!();
@@ -687,9 +663,7 @@ impl Node for GetCurrentLanguageNode {
         let get_language = translation
             .getattr("get_language")
             .map_err(|e| TemplateError::Internal(format!("Cannot get get_language: {e}")))?;
-        let result = get_language
-            .call0()
-            .map_err(|e| TemplateError::Internal(format!("get_language() failed: {e}")))?;
+        let result = get_language.call0()?;
         let lang: String = result
             .extract::<String>()
             .unwrap_or_else(|_| "en".to_owned());
@@ -741,9 +715,7 @@ impl Node for GetCurrentLanguageBidiNode {
         let get_language_bidi = translation
             .getattr("get_language_bidi")
             .map_err(|e| TemplateError::Internal(format!("Cannot get get_language_bidi: {e}")))?;
-        let result = get_language_bidi
-            .call0()
-            .map_err(|e| TemplateError::Internal(format!("get_language_bidi() failed: {e}")))?;
+        let result = get_language_bidi.call0()?;
         let bidi: bool = result.extract::<bool>().unwrap_or(false);
 
         context.set(self.variable.clone(), Value::Bool(bidi));
@@ -840,7 +812,7 @@ struct GetLanguageInfoNode {
 
 impl Node for GetLanguageInfoNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let code_val = resolve_expr(py, &self.lang_code, context);
+        let code_val = resolve_expr(py, &self.lang_code, context)?;
         let code_str = code_val.to_string();
 
         let translation = py
@@ -849,9 +821,7 @@ impl Node for GetLanguageInfoNode {
         let get_language_info = translation
             .getattr("get_language_info")
             .map_err(|e| TemplateError::Internal(format!("Cannot get get_language_info: {e}")))?;
-        let result = get_language_info
-            .call1((code_str.as_str(),))
-            .map_err(|e| TemplateError::Internal(format!("get_language_info() failed: {e}")))?;
+        let result = get_language_info.call1((code_str.as_str(),))?;
 
         let py_value = Value::from(&result);
         context.set(self.variable.clone(), py_value);
@@ -899,7 +869,7 @@ struct GetLanguageInfoListNode {
 
 impl Node for GetLanguageInfoListNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let langs_val = resolve_expr(py, &self.languages, context);
+        let langs_val = resolve_expr(py, &self.languages, context)?;
 
         let translation = py
             .import("django.utils.translation")

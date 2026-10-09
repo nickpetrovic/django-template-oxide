@@ -10,8 +10,8 @@ use pyo3::prelude::*;
 
 use crate::context::{Context, Value};
 use crate::errors::TemplateError;
-use crate::filters::{FilterId, NativeFilter, get_default_filters};
 use crate::nodes::{Node, render_value_in_context_into, value_from_pyany_fast};
+use crate::variable::NativeFilterRef;
 
 /// Body-program instruction. Stays small for tight jump-table dispatch.
 #[derive(Debug, Clone)]
@@ -20,9 +20,6 @@ pub enum Op {
     EmitText(u32),
     /// Read tuple slot, stringify, autoescape if enabled.
     EmitSlot(u16),
-    /// `EmitSlot` without escaping; for known-safe values.
-    EmitSlotSafe(u16),
-    /// Read from `pre_filter_results[column_idx][current_row_index]`.
     EmitFilterColumn(u32),
     /// Truthiness test on the tuple slot.
     JmpIfSlotFalsy {
@@ -34,19 +31,21 @@ pub enum Op {
     InvokeNode(u32),
 }
 
-/// A column filtered up-front, before the iteration loop. One `Value`
-/// per row, computed in a tight Rust loop.
 #[derive(Debug, Clone)]
 pub struct ColumnSpec {
     pub slot: u16,
-    pub filter_id: FilterId,
-    pub native_fn: NativeFilterFn,
+    pub native: NativeFilterRef,
     pub arg: Option<Value>,
-    pub is_safe_filter: bool,
-    pub needs_autoescape: bool,
 }
 
-type NativeFilterFn = fn(&Value, &[Value], bool) -> Value;
+impl ColumnSpec {
+    fn args(&self) -> &[Value] {
+        match &self.arg {
+            Some(arg) => std::slice::from_ref(arg),
+            None => &[],
+        }
+    }
+}
 
 /// Compiled for-loop body. Held by `ForNode`. `InvokeNode(idx)`
 /// dispatches into the original NodeList so we don't have to clone
@@ -59,50 +58,31 @@ pub struct BodyProgram {
 }
 
 impl BodyProgram {
-    /// Apply every column spec to every row's tuple in one Rust pass,
-    /// returning one `Vec<Value>` per column. Amortises filter dispatch
-    /// across the iteration.
     pub fn precompute_columns(
         &self,
         py: Python<'_>,
         tuples: &[Py<pyo3::PyAny>],
         autoescape: bool,
-    ) -> Vec<Vec<Value>> {
-        let mut out: Vec<Vec<Value>> = Vec::with_capacity(self.columns.len());
-        for col in &self.columns {
-            let mut col_values: Vec<Value> = Vec::with_capacity(tuples.len());
-            let args_slice: &[Value] = match &col.arg {
-                Some(a) => std::slice::from_ref(a),
-                None => &[],
-            };
-            let ae = if col.needs_autoescape {
-                autoescape
-            } else {
-                false
-            };
-            for tup in tuples {
-                let bound = tup.bind(py);
-                let val = match bound.get_item(col.slot as usize) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        col_values.push(Value::None);
-                        continue;
-                    }
-                };
-                let input = value_from_pyany_fast(&val);
-                let mut result =
-                    col.filter_id
-                        .dispatch(&input, args_slice, ae, Some(col.native_fn));
-                if col.is_safe_filter
-                    && let Value::String(s) = result
-                {
-                    result = Value::SafeString(Arc::from(s));
-                }
-                col_values.push(result);
-            }
-            out.push(col_values);
-        }
-        out
+        use_tz: Option<bool>,
+    ) -> Vec<Vec<Option<Value>>> {
+        self.columns
+            .iter()
+            .map(|column| {
+                tuples
+                    .iter()
+                    .map(|tuple| {
+                        let item = tuple.bind(py).get_item(column.slot as usize).ok()?;
+                        column.native.try_fast(
+                            py,
+                            &value_from_pyany_fast(&item),
+                            column.args(),
+                            autoescape,
+                            use_tz,
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     pub fn has_columns(&self) -> bool {
@@ -117,7 +97,7 @@ impl BodyProgram {
         context: &mut Context,
         out: &mut String,
         body_nodelist: &crate::nodes::NodeList,
-        pre_filter_results: &[&[Value]],
+        pre_filter_results: &[&[Option<Value>]],
         row_index: usize,
     ) -> Result<(), TemplateError> {
         // Keep a tuple ref so we can also mut-borrow `context` for
@@ -140,36 +120,35 @@ impl BodyProgram {
                     pc += 1;
                 }
                 Op::EmitSlot(slot) => {
-                    if let Ok(val) = tuple.get_item(*slot as usize) {
-                        let v = value_from_pyany_fast(&val);
-                        render_value_in_context_into(&v, context, out);
-                    }
-                    pc += 1;
-                }
-                Op::EmitSlotSafe(slot) => {
-                    if let Ok(val) = tuple.get_item(*slot as usize) {
-                        // Bypass autoescape (mirrors `{{ x|safe }}`).
-                        let prev_autoescape = context.autoescape;
-                        context.autoescape = false;
-                        let v = value_from_pyany_fast(&val);
-                        render_value_in_context_into(&v, context, out);
-                        context.autoescape = prev_autoescape;
-                    }
+                    let value = value_from_pyany_fast(&tuple.get_item(*slot as usize)?);
+                    render_value_in_context_into(&value, context, out)?;
                     pc += 1;
                 }
                 Op::EmitFilterColumn(column_idx) => {
-                    let column = &pre_filter_results[*column_idx as usize];
-                    if let Some(value) = column.get(row_index) {
-                        render_value_in_context_into(value, context, out);
+                    let precomputed = pre_filter_results
+                        .get(*column_idx as usize)
+                        .and_then(|column| column.get(row_index))
+                        .and_then(Option::as_ref);
+                    match precomputed {
+                        Some(value) => render_value_in_context_into(value, context, out)?,
+                        None => {
+                            let column = &self.columns[*column_idx as usize];
+                            let input =
+                                value_from_pyany_fast(&tuple.get_item(column.slot as usize)?);
+                            let value = column.native.call(
+                                py,
+                                &input,
+                                column.args(),
+                                context.autoescape,
+                                context.use_tz,
+                            )?;
+                            render_value_in_context_into(&value, context, out)?;
+                        }
                     }
                     pc += 1;
                 }
                 Op::JmpIfSlotFalsy { slot, else_pc } => {
-                    let truthy = tuple
-                        .get_item(*slot as usize)
-                        .ok()
-                        .and_then(|v| v.is_truthy().ok())
-                        .unwrap_or(false);
+                    let truthy = tuple.get_item(*slot as usize)?.is_truthy()?;
                     if truthy {
                         pc += 1;
                     } else {
@@ -194,7 +173,8 @@ impl BodyProgram {
                             v.render_annotated_into(py, context, out)?;
                         }
                         crate::nodes::NodeEntry::Boxed(n) => {
-                            n.render_annotated_into(py, context, out)?;
+                            n.render_annotated_into(py, context, out)
+                                .map_err(|error| error.at_node_index(*idx as usize))?;
                         }
                     }
                     pc += 1;
@@ -240,14 +220,9 @@ impl ProgramBuilder {
     }
 
     fn register_column(&mut self, spec: ColumnSpec) -> u32 {
-        // Dedupe: same slot+filter+arg shares a column.
         for (i, existing) in self.columns.iter().enumerate() {
             if existing.slot == spec.slot
-                && existing.filter_id == spec.filter_id
-                && existing.arg.as_ref().map(values_eq).unwrap_or(true)
-                    == spec.arg.as_ref().map(values_eq).unwrap_or(true)
-                && existing.is_safe_filter == spec.is_safe_filter
-                && existing.needs_autoescape == spec.needs_autoescape
+                && std::ptr::eq(existing.native, spec.native)
                 && existing.arg == spec.arg
             {
                 return i as u32;
@@ -272,12 +247,6 @@ impl ProgramBuilder {
         }
     }
 }
-
-#[inline]
-fn values_eq(v: &Value) -> bool {
-    let _ = v;
-    true
-} // helper for the explicit compare
 
 /// Walk a NodeList, emitting `Op::InvokeNode(idx)` for entries we
 /// can't specialise. `false` only on structural failure.
@@ -311,9 +280,6 @@ fn compile_nodelist(
     true
 }
 
-/// `VariableNode` -> `EmitSlot` / `EmitSlotSafe` / `EmitFilterColumn`.
-/// Returns false for non-loopvar paths, chained filters, custom
-/// filters, or non-constant filter args.
 fn compile_variable(
     builder: &mut ProgramBuilder,
     var_node: &crate::nodes::VariableNode,
@@ -322,7 +288,6 @@ fn compile_variable(
     let fe = &var_node.filter_expression;
     use crate::variable::FilterExpressionVar;
 
-    // Literals are rare in for-loop bodies and parse-time foldable.
     let variable = match &fe.var {
         FilterExpressionVar::Var(v) => v,
         _ => return false,
@@ -332,7 +297,7 @@ fn compile_variable(
         Some(p) => p,
         None => return false,
     };
-    if parts.len() < 2 || parts[0] != loopvar {
+    if parts.len() < 2 || parts[0] != loopvar || variable.translate {
         return false;
     }
     let slot = match variable.batch_slot() {
@@ -345,19 +310,14 @@ fn compile_variable(
         return true;
     }
 
-    if fe.filters.len() != 1 {
+    if fe.filters.len() != 1 || fe.natives.len() != 1 {
         return false;
     }
     let pf = &fe.filters[0];
-    let registry = get_default_filters();
-    let native: &'static NativeFilter = match registry.get(&pf.name) {
-        Some(n) => n,
-        None => return false,
+    let Some(native) = fe.natives[0] else {
+        return false;
     };
-    let filter_id = FilterId::from_name(&pf.name);
-    // `External` is fine; routes through `(native.func)(...)`.
 
-    // Constant args only; lookups / `_("...")` force fallback.
     let arg: Option<Value> = match pf.args.len() {
         0 => None,
         1 => {
@@ -370,14 +330,7 @@ fn compile_variable(
         _ => return false,
     };
 
-    let column_idx = builder.register_column(ColumnSpec {
-        slot,
-        filter_id,
-        native_fn: native.func,
-        arg,
-        is_safe_filter: native.is_safe,
-        needs_autoescape: native.needs_autoescape,
-    });
+    let column_idx = builder.register_column(ColumnSpec { slot, native, arg });
     builder.emit(Op::EmitFilterColumn(column_idx));
     true
 }

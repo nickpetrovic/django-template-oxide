@@ -40,11 +40,10 @@ pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"] }
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+strip = false
 
 # Profile with: cargo build --profile profiling
 # Keeps debug symbols for samply/Instruments while staying fast.
 [profile.profiling]
 inherits = "release"
-strip = false
 debug = "full"

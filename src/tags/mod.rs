@@ -27,27 +27,24 @@ use crate::variable::FilterExpression;
 #[allow(unused_imports)]
 use crate::impl_node_metadata;
 
-/// Resolve an `IfValue::Token` to a `Value`. For `{% if %}` conditions,
-/// missing variables resolve to `Value::None` (Django's
-/// `ignore_failures=True`), not to `string_if_invalid`.
-pub(super) fn resolve_if_value(
+pub(super) fn resolve_value(
     py: Python<'_>,
     fe: &FilterExpression,
-    context: &mut Context,
-) -> Value {
-    let saved_sii = std::mem::take(&mut context.string_if_invalid);
-    let result = crate::nodes::resolve_expression_ignore_failures(py, fe, context);
-    context.string_if_invalid = saved_sii;
-
-    match result {
-        Ok(v) => v,
-        Err(_) => Value::None,
-    }
+    context: &Context,
+) -> Result<Value, TemplateError> {
+    crate::nodes::resolve_expression_rust(py, fe, context)
 }
 
-/// Determine the truthiness of a `Value`, matching Python/Django semantics.
-fn value_is_truthy(value: &Value) -> bool {
-    match value {
+pub(super) fn resolve_value_ignore_failures(
+    py: Python<'_>,
+    fe: &FilterExpression,
+    context: &Context,
+) -> Result<Value, TemplateError> {
+    crate::nodes::resolve_expression_ignore_failures(py, fe, context)
+}
+
+pub(crate) fn python_truthy(py: Python<'_>, value: &Value) -> Result<bool, TemplateError> {
+    Ok(match value {
         Value::None => false,
         Value::Bool(b) => *b,
         Value::Int(n) => *n != 0,
@@ -56,50 +53,148 @@ fn value_is_truthy(value: &Value) -> bool {
         Value::SafeString(s) => !s.is_empty(),
         Value::List(items) => !items.is_empty(),
         Value::Dict(map) => !map.is_empty(),
-        // Defer to Python's `bool()` for opaque PyObjects (ErrorList,
-        // QuerySet, custom `__bool__`/`__len__`). Assuming truthy here
-        // caused `{% if field.errors %}` to always fire.
-        Value::PyObject(obj) => Python::attach(|py| obj.bind(py).is_truthy().unwrap_or(true)),
+        Value::PyObject(obj) => {
+            let truthy = obj.bind(py).is_truthy();
+            crate::filters::invalidate_locale_snapshot();
+            truthy?
+        }
+    })
+}
+
+pub(crate) fn is_variable_does_not_exist(py: Python<'_>, error: &TemplateError) -> bool {
+    match error {
+        TemplateError::VariableDoesNotExist { .. } => true,
+        TemplateError::PythonError(err) => crate::python_cache::django(py)
+            .map(|dj| {
+                err.matches(py, dj.variable_does_not_exist_cls.bind(py))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
-/// Compare two `Value`s, returning an `Ordering` for comparison operators.
-/// Returns `None` if the values are not comparable.
-fn value_compare(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
-    if let (Some(a), Some(b)) = (left.as_str(), right.as_str()) {
-        return Some(a.cmp(b));
-    }
-    match (left, right) {
-        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
-        (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+fn exact_numeric(value: &Value) -> Option<f64> {
+    const EXACT_LIMIT: i64 = 1 << 53;
+    match value {
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        Value::Int(n) if (-EXACT_LIMIT..=EXACT_LIMIT).contains(n) => Some(*n as f64),
+        Value::Float(f) => Some(*f),
         _ => None,
     }
 }
 
-/// Check if `needle` is "in" `haystack`, matching Django's `in` operator.
-fn value_in(needle: &Value, haystack: &Value) -> bool {
-    if let Some(haystack_str) = haystack.as_str() {
-        return needle.as_str().is_some_and(|n| haystack_str.contains(n));
-    }
-    match haystack {
-        Value::List(items) => items.iter().any(|item| item == needle),
-        Value::Dict(map) => {
-            if let Some(k) = needle.as_str() {
-                map.contains_key(k)
-            } else {
-                false
+fn native_comparison(op: InfixOp, left: &Value, right: &Value) -> Option<bool> {
+    use std::cmp::Ordering;
+    let ordering: Option<Ordering> = match (left, right) {
+        (Value::String(_) | Value::SafeString(_), Value::String(_) | Value::SafeString(_)) => {
+            Some(left.as_str()?.cmp(right.as_str()?))
+        }
+        _ => {
+            let (a, b) = (exact_numeric(left)?, exact_numeric(right)?);
+            match op {
+                InfixOp::Eq => return Some(a == b),
+                InfixOp::NotEq => return Some(a != b),
+                _ => a.partial_cmp(&b),
             }
         }
-        // Delegate `in` on PyObjects to Python's `__contains__`.
-        Value::PyObject(obj) => Python::attach(|py| {
-            let bound = obj.bind(py);
-            let needle_obj = needle.to_pyobject(py);
-            bound.contains(needle_obj.bind(py)).unwrap_or(false)
+    };
+    let Some(ordering) = ordering else {
+        return Some(false);
+    };
+    Some(match op {
+        InfixOp::Eq => ordering == Ordering::Equal,
+        InfixOp::NotEq => ordering != Ordering::Equal,
+        InfixOp::Gt => ordering == Ordering::Greater,
+        InfixOp::Gte => ordering != Ordering::Less,
+        InfixOp::Lt => ordering == Ordering::Less,
+        InfixOp::Lte => ordering != Ordering::Greater,
+        _ => return None,
+    })
+}
+
+fn python_identity(py: Python<'_>, left: &Value, right: &Value, shared_source: bool) -> bool {
+    match (left, right) {
+        (Value::None, Value::None) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Int(a), Value::Int(b)) => a == b && (shared_source || (-5..=256).contains(a)),
+        (Value::Float(a), Value::Float(b)) => shared_source && a.to_bits() == b.to_bits(),
+        (Value::String(a), Value::String(b)) => shared_source && a == b,
+        (Value::SafeString(a), Value::SafeString(b)) => std::sync::Arc::ptr_eq(a, b),
+        (Value::PyObject(a), Value::PyObject(b)) => a.bind(py).is(b.bind(py)),
+        _ => false,
+    }
+}
+
+fn operand_is_lookup(expr: &IfExpr, vars: &HashMap<String, FilterExpression>) -> bool {
+    use crate::variable::FilterExpressionVar;
+    match expr {
+        IfExpr::Literal(IfValue::Token(token)) => vars.get(token).is_some_and(|fe| {
+            fe.filters.is_empty()
+                && matches!(&fe.var, FilterExpressionVar::Var(var) if var.is_lookup())
         }),
         _ => false,
     }
+}
+
+fn compare_values(
+    py: Python<'_>,
+    op: InfixOp,
+    left: &Value,
+    right: &Value,
+    shared_source: bool,
+) -> Result<Value, TemplateError> {
+    use pyo3::basic::CompareOp;
+    match op {
+        InfixOp::Is => return Ok(Value::Bool(python_identity(py, left, right, shared_source))),
+        InfixOp::IsNot => {
+            return Ok(Value::Bool(!python_identity(
+                py,
+                left,
+                right,
+                shared_source,
+            )));
+        }
+        InfixOp::In | InfixOp::NotIn => {
+            let contained = match (left, right) {
+                (
+                    Value::String(_) | Value::SafeString(_),
+                    Value::String(_) | Value::SafeString(_),
+                ) => right
+                    .as_str()
+                    .expect("string variant")
+                    .contains(left.as_str().expect("string variant")),
+                _ => {
+                    let contained = right
+                        .to_pyobject(py)
+                        .bind(py)
+                        .contains(left.to_pyobject(py).bind(py));
+                    crate::filters::invalidate_locale_snapshot();
+                    contained?
+                }
+            };
+            return Ok(Value::Bool(contained == (op == InfixOp::In)));
+        }
+        _ => {}
+    }
+    if let Some(result) = native_comparison(op, left, right) {
+        return Ok(Value::Bool(result));
+    }
+    let compare_op = match op {
+        InfixOp::Eq => CompareOp::Eq,
+        InfixOp::NotEq => CompareOp::Ne,
+        InfixOp::Gt => CompareOp::Gt,
+        InfixOp::Gte => CompareOp::Ge,
+        InfixOp::Lt => CompareOp::Lt,
+        InfixOp::Lte => CompareOp::Le,
+        _ => unreachable!("logical and membership operators handled above"),
+    };
+    let result = left
+        .to_pyobject(py)
+        .bind(py)
+        .rich_compare(right.to_pyobject(py).bind(py), compare_op);
+    crate::filters::invalidate_locale_snapshot();
+    Ok(Value::from(&result?))
 }
 
 /// A compiled if-expression condition: pairs a token string with its
@@ -139,106 +234,67 @@ impl CompiledIfExpr {
     }
 }
 
-/// Evaluate an `IfExpr` AST node against a context.
 fn eval_if_expr(
     py: Python<'_>,
     expr: &IfExpr,
     vars: &HashMap<String, FilterExpression>,
-    context: &mut Context,
-) -> bool {
+    context: &Context,
+) -> Result<Value, TemplateError> {
     match expr {
         IfExpr::Literal(IfValue::Token(token)) => {
-            if let Some(fe) = vars.get(token) {
-                let val = resolve_if_value(py, fe, context);
-                value_is_truthy(&val)
-            } else {
-                false
-            }
+            let fe = vars
+                .get(token)
+                .expect("every if-expression token is compiled at parse time");
+            resolve_value_ignore_failures(py, fe, context)
         }
         IfExpr::Prefix {
             op: PrefixOp::Not,
             operand,
-        } => !eval_if_expr(py, operand, vars, context),
-        IfExpr::Infix { op, left, right } => match op {
-            InfixOp::And => {
-                eval_if_expr(py, left, vars, context) && eval_if_expr(py, right, vars, context)
-            }
-            InfixOp::Or => {
-                eval_if_expr(py, left, vars, context) || eval_if_expr(py, right, vars, context)
-            }
-            _ => {
-                let left_val = eval_if_expr_to_value(py, left, vars, context);
-                let right_val = eval_if_expr_to_value(py, right, vars, context);
-                match op {
-                    InfixOp::Eq => left_val == right_val,
-                    InfixOp::NotEq => left_val != right_val,
-                    InfixOp::Gt => {
-                        value_compare(&left_val, &right_val) == Some(std::cmp::Ordering::Greater)
-                    }
-                    InfixOp::Gte => matches!(
-                        value_compare(&left_val, &right_val),
-                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                    ),
-                    InfixOp::Lt => {
-                        value_compare(&left_val, &right_val) == Some(std::cmp::Ordering::Less)
-                    }
-                    InfixOp::Lte => matches!(
-                        value_compare(&left_val, &right_val),
-                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                    ),
-                    InfixOp::In => value_in(&left_val, &right_val),
-                    InfixOp::NotIn => !value_in(&left_val, &right_val),
-                    InfixOp::Is => left_val == right_val,
-                    InfixOp::IsNot => left_val != right_val,
-                    InfixOp::And | InfixOp::Or => unreachable!(),
-                }
-            }
-        },
+        } => Ok(Value::Bool(
+            eval_if_expr(py, operand, vars, context)
+                .and_then(|value| python_truthy(py, &value))
+                .map(|truthy| !truthy)
+                .unwrap_or(false),
+        )),
+        IfExpr::Infix { op, left, right } => {
+            Ok(eval_infix(py, *op, left, right, vars, context).unwrap_or(Value::Bool(false)))
+        }
     }
 }
 
-/// Evaluate an `IfExpr` to a `Value` (for comparison operators).
-fn eval_if_expr_to_value(
+fn eval_infix(
     py: Python<'_>,
-    expr: &IfExpr,
+    op: InfixOp,
+    left: &IfExpr,
+    right: &IfExpr,
     vars: &HashMap<String, FilterExpression>,
-    context: &mut Context,
-) -> Value {
-    match expr {
-        IfExpr::Literal(IfValue::Token(token)) => {
-            if let Some(fe) = vars.get(token) {
-                resolve_if_value(py, fe, context)
-            } else {
-                Value::String(String::new())
-            }
+    context: &Context,
+) -> Result<Value, TemplateError> {
+    let left_value = eval_if_expr(py, left, vars, context)?;
+    match op {
+        InfixOp::Or if python_truthy(py, &left_value)? => Ok(left_value),
+        InfixOp::Or => eval_if_expr(py, right, vars, context),
+        InfixOp::And if !python_truthy(py, &left_value)? => Ok(left_value),
+        InfixOp::And => eval_if_expr(py, right, vars, context),
+        _ => {
+            let right_value = eval_if_expr(py, right, vars, context)?;
+            let shared_source = matches!(op, InfixOp::Is | InfixOp::IsNot)
+                && operand_is_lookup(left, vars)
+                && operand_is_lookup(right, vars);
+            compare_values(py, op, &left_value, &right_value, shared_source)
         }
-        IfExpr::Prefix {
-            op: PrefixOp::Not,
-            operand,
-        } => Value::Bool(!eval_if_expr(py, operand, vars, context)),
-        IfExpr::Infix {
-            op: InfixOp::And,
-            left,
-            right,
-        } => {
-            if eval_if_expr(py, left, vars, context) {
-                eval_if_expr_to_value(py, right, vars, context)
-            } else {
-                eval_if_expr_to_value(py, left, vars, context)
-            }
-        }
-        IfExpr::Infix {
-            op: InfixOp::Or,
-            left,
-            right,
-        } => {
-            if eval_if_expr(py, left, vars, context) {
-                eval_if_expr_to_value(py, left, vars, context)
-            } else {
-                eval_if_expr_to_value(py, right, vars, context)
-            }
-        }
-        IfExpr::Infix { .. } => Value::Bool(eval_if_expr(py, expr, vars, context)),
+    }
+}
+
+fn condition_matches(
+    py: Python<'_>,
+    compiled: &CompiledIfExpr,
+    context: &Context,
+) -> Result<bool, TemplateError> {
+    match eval_if_expr(py, &compiled.expr, &compiled.vars, context) {
+        Ok(value) => python_truthy(py, &value),
+        Err(error) if is_variable_does_not_exist(py, &error) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -297,17 +353,9 @@ impl IfNode {
 
 impl Node for IfNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        for branch in &self.branches {
-            let should_render = match &branch.condition {
-                None => true, // {% else %}
-                Some(compiled) => eval_if_expr(py, &compiled.expr, &compiled.vars, context),
-            };
-            if should_render {
-                let safe = branch.nodelist.render(py, context)?;
-                return Ok(safe.as_str().to_owned());
-            }
-        }
-        Ok(String::new())
+        let mut out = String::new();
+        self.render_annotated_into(py, context, &mut out)?;
+        Ok(out)
     }
 
     /// Stream matched branch children into the surrounding buffer,
@@ -321,8 +369,8 @@ impl Node for IfNode {
     ) -> Result<(), TemplateError> {
         for branch in &self.branches {
             let should_render = match &branch.condition {
-                None => true, // {% else %}
-                Some(compiled) => eval_if_expr(py, &compiled.expr, &compiled.vars, context),
+                None => true,
+                Some(compiled) => condition_matches(py, compiled, context)?,
             };
             if should_render {
                 return branch.nodelist.render_into(py, context, out);
@@ -775,24 +823,24 @@ struct FirstOfNode {
 
 impl Node for FirstOfNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        use crate::nodes::render_value_in_context;
-
+        let mut first = Value::String(String::new());
         for fe in &self.vars {
-            let val = resolve_if_value(py, fe, context);
-            if value_is_truthy(&val) {
-                let rendered = render_value_in_context(&val, context);
-                if let Some(ref asvar) = self.asvar {
-                    context.set(asvar.clone(), Value::SafeString(rendered.into()));
-                    return Ok(String::new());
-                }
-                return Ok(rendered);
+            let value = resolve_value_ignore_failures(py, fe, context)?;
+            if python_truthy(py, &value)? {
+                let rendered = crate::nodes::render_value_in_context(&value, context)?;
+                first = if context.autoescape {
+                    Value::SafeString(rendered.into())
+                } else {
+                    Value::String(rendered)
+                };
+                break;
             }
         }
-
         if let Some(ref asvar) = self.asvar {
-            context.set(asvar.clone(), Value::String(String::new()));
+            context.set(asvar.clone(), first);
+            return Ok(String::new());
         }
-        Ok(String::new())
+        Ok(first.as_str().unwrap_or_default().to_owned())
     }
 
     impl_node_metadata!();
@@ -849,86 +897,26 @@ struct CycleNode {
 
 impl Node for CycleNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        use crate::nodes::render_value_in_context;
-
         let cycle_key = &self.render_key;
         let current_index = match context.render_context.get(cycle_key) {
             Some(Value::Int(n)) => *n as usize,
             _ => 0,
         };
-
-        let val = if !self.cyclevars.is_empty() {
-            let idx = current_index % self.cyclevars.len();
-            let fe = &self.cyclevars[idx];
-            if fe.filters.is_empty() {
-                resolve_if_value(py, fe, context)
-            } else {
-                use crate::filters::get_default_filters;
-                let native_filters = get_default_filters();
-                let mut obj = resolve_if_value(py, fe, context);
-                for parsed_filter in &fe.filters {
-                    if let Some(native) = native_filters.get(&parsed_filter.name) {
-                        let mut arg_vals: Vec<Value> = Vec::new();
-                        for arg in &parsed_filter.args {
-                            if !arg.is_lookup {
-                                arg_vals.push(match &arg.constant {
-                                    Some(s) => Value::SafeString(s.clone().into()),
-                                    None => Value::None,
-                                });
-                            } else {
-                                let var = arg
-                                    .variable
-                                    .as_ref()
-                                    .expect("lookup args always carry a variable");
-                                let parts: Vec<&str> = var.var.split('.').collect();
-                                let resolved = match context.get(parts[0]) {
-                                    Some(v) => v.clone(),
-                                    None => Value::String(String::new()),
-                                };
-                                arg_vals.push(resolved);
-                            }
-                        }
-                        let autoescape = if native.needs_autoescape {
-                            context.autoescape
-                        } else {
-                            false
-                        };
-                        let was_safe = matches!(&obj, Value::SafeString(_));
-                        let result = (native.func)(&obj, &arg_vals, autoescape);
-                        obj = if native.is_safe && was_safe {
-                            match result {
-                                Value::String(s) => Value::SafeString(s.into()),
-                                other => other,
-                            }
-                        } else {
-                            result
-                        };
-                    }
-                }
-                obj
-            }
-        } else {
-            Value::String(String::new())
-        };
-
         context
             .render_context
             .set(cycle_key.clone(), Value::Int((current_index + 1) as i64));
 
-        let rendered = render_value_in_context(&val, context);
-
+        let value = match self.cyclevars.len() {
+            0 => Value::String(String::new()),
+            count => resolve_value(py, &self.cyclevars[current_index % count], context)?,
+        };
         if let Some(ref var_name) = self.variable_name {
-            // set_upward (not set) so the cycle var persists across
-            // {% with %} push/pop cycles. set() would lose it when the
-            // {% with %} scope pops.
-            context.set_upward(var_name, Value::String(rendered.clone()));
+            context.set_upward(var_name, value.clone());
         }
-
         if self.silent {
-            Ok(String::new())
-        } else {
-            Ok(rendered)
+            return Ok(String::new());
         }
+        crate::nodes::render_value_in_context(&value, context)
     }
 
     impl_node_metadata!();
@@ -1238,7 +1226,7 @@ fn register_library_tags(
 
 #[derive(Debug)]
 struct NowNode {
-    format_string: FilterExpression,
+    format_string: String,
     asvar: Option<String>,
     token_field: Option<Token>,
     origin_field: Option<Origin>,
@@ -1246,55 +1234,29 @@ struct NowNode {
 
 impl Node for NowNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let format_val = resolve_if_value(py, &self.format_string, context);
-        let format_str = format_val.to_string();
-
-        // Use Django's `date` filter so format names like DATE_FORMAT
-        // resolve via django.utils.formats.date_format().
-        let formatted: String = (|| {
-            let date_filter = py
-                .import("django.template.defaultfilters")
-                .map_err(|e| TemplateError::Internal(format!("Cannot import defaultfilters: {e}")))?
-                .getattr("date")
-                .map_err(|e| TemplateError::Internal(format!("Cannot get date filter: {e}")))?;
-            let datetime_mod = py
-                .import("datetime")
-                .map_err(|e| TemplateError::Internal(format!("Cannot import datetime: {e}")))?;
-            let settings = py
-                .import("django.conf")
-                .map_err(|e| TemplateError::Internal(format!("{e}")))?
-                .getattr("settings")
-                .map_err(|e| TemplateError::Internal(format!("{e}")))?;
-            let use_tz = settings
-                .getattr("USE_TZ")
-                .and_then(|v| v.extract::<bool>())
-                .unwrap_or(false);
-            let now = if use_tz {
-                let tz_mod = py
-                    .import("django.utils.timezone")
-                    .map_err(|e| TemplateError::Internal(format!("{e}")))?;
-                let tz = tz_mod
-                    .call_method0("get_current_timezone")
-                    .map_err(|e| TemplateError::Internal(format!("{e}")))?;
-                datetime_mod
-                    .getattr("datetime")
-                    .map_err(|e| TemplateError::Internal(format!("{e}")))?
-                    .call_method1("now", (&tz,))
-                    .map_err(|e| TemplateError::Internal(format!("{e}")))?
-            } else {
-                datetime_mod
-                    .getattr("datetime")
-                    .map_err(|e| TemplateError::Internal(format!("{e}")))?
-                    .call_method0("now")
-                    .map_err(|e| TemplateError::Internal(format!("{e}")))?
-            };
-            let result = date_filter
-                .call1((&now, format_str.as_str()))
-                .map_err(|e| TemplateError::Internal(format!("date filter failed: {e}")))?;
-            result
-                .extract::<String>()
-                .map_err(|e| TemplateError::Internal(format!("date filter result not string: {e}")))
-        })()?;
+        let dj = crate::python_cache::django(py)?;
+        let use_tz = dj
+            .settings
+            .bind(py)
+            .getattr(pyo3::intern!(py, "USE_TZ"))?
+            .is_truthy()?;
+        let tzinfo = if use_tz {
+            py.import("django.utils.timezone")?
+                .call_method0("get_current_timezone")?
+        } else {
+            py.None().into_bound(py)
+        };
+        let now = py
+            .import("datetime")?
+            .getattr("datetime")?
+            .call_method1("now", (tzinfo,))?;
+        let formatted = dj
+            .builtin_filters
+            .bind(py)
+            .get_item("date")?
+            .call1((now, self.format_string.as_str()))?
+            .str()?
+            .to_string();
 
         if let Some(ref asvar) = self.asvar {
             context.set(asvar.clone(), Value::String(formatted));
@@ -1311,20 +1273,23 @@ impl Node for NowNode {
     }
 }
 
-pub fn compile_now(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, TemplateError> {
-    let bits = token.split_contents();
-    if bits.len() < 2 {
+pub fn compile_now(_parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, TemplateError> {
+    let mut bits = token.split_contents();
+    let mut asvar = None;
+    if bits.len() == 4 && bits[2] == "as" {
+        asvar = bits.pop();
+        bits.pop();
+    }
+    if bits.len() != 2 {
         return Err(TemplateError::TemplateSyntaxError(
-            "'now' statement requires one argument (format string).".into(),
+            "'now' statement takes one argument".into(),
         ));
     }
-
-    let format_string = parser.compile_filter(&bits[1])?;
-
-    let asvar = if bits.len() >= 4 && bits[2] == "as" {
-        Some(bits[3].clone())
+    let chars: Vec<char> = bits[1].chars().collect();
+    let format_string: String = if chars.len() < 2 {
+        String::new()
     } else {
-        None
+        chars[1..chars.len() - 1].iter().collect()
     };
 
     Ok(Box::new(NowNode {
@@ -1348,24 +1313,43 @@ struct FilterNode {
 
 impl Node for FilterNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        // Body is already escaped per autoescape, so wrap as SafeString.
         let safe = self.nodelist.render(py, context)?;
         let content = Value::SafeString(safe.as_str().to_owned().into());
 
-        // Bind `var` to the rendered content for the filter chain
-        // (compiled at parse time as `var|<chain>`).
         let mut layer = ContextDict::new();
         layer.insert("var".to_owned(), content);
         context.push_with(layer);
 
-        let result =
-            crate::nodes::resolve_expression_ignore_failures(py, &self.filter_expr, context);
+        let result = resolve_value(py, &self.filter_expr, context);
         context.pop();
 
-        let val = result?;
-        // Filters can return non-strings (length, default_if_none, etc.);
-        // `Value::Display` matches Django's `force_str`.
-        Ok(val.to_string())
+        match result? {
+            Value::String(s) => Ok(s),
+            Value::SafeString(s) => Ok(s.to_string()),
+            Value::PyObject(obj) if obj.bind(py).is_instance_of::<pyo3::types::PyString>() => {
+                Ok(obj.bind(py).str()?.to_string())
+            }
+            other => {
+                let error = match pyo3::types::PyString::new(py, "").call_method1(
+                    pyo3::intern!(py, "join"),
+                    (pyo3::types::PyList::new(py, [other.to_pyobject(py)])?,),
+                ) {
+                    Ok(joined) => return Ok(joined.str()?.to_string()),
+                    Err(error) => error,
+                };
+                let message = error.value(py).str()?.to_string();
+                match message
+                    .strip_prefix("sequence item 0: expected str instance, ")
+                    .and_then(|rest| rest.strip_suffix(" found"))
+                {
+                    Some(type_name) => Err(TemplateError::NodeOutputNotString {
+                        index: None,
+                        type_name: type_name.to_owned(),
+                    }),
+                    None => Err(error.into()),
+                }
+            }
+        }
     }
 
     impl_node_metadata!();
@@ -1387,11 +1371,26 @@ pub fn compile_filter(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node
         ));
     }
 
-    // Compile as `var|<chain>` (Django's `defaulttags.do_filter`). Plain
-    // `var` keeps Variable parsing happy (leading underscores are rejected).
     let filter_chain = bits[1..].join(" ");
     let filter_token = format!("var|{}", filter_chain);
     let filter_expr = parser.compile_filter(&filter_token)?;
+    Python::attach(|py| -> Result<(), TemplateError> {
+        for func in filter_expr.filter_funcs.iter() {
+            let filter_name = func
+                .bind(py)
+                .getattr(pyo3::intern!(py, "_filter_name"))
+                .ok()
+                .and_then(|name| name.extract::<String>().ok());
+            if let Some(name) = filter_name
+                && (name == "escape" || name == "safe")
+            {
+                return Err(TemplateError::TemplateSyntaxError(format!(
+                    "\"filter {name}\" is not permitted. Use the \"autoescape\" tag instead."
+                )));
+            }
+        }
+        Ok(())
+    })?;
 
     let nodelist = parser.parse(&["endfilter"])?;
     parser.delete_first_token();
@@ -1471,39 +1470,55 @@ struct WidthRatioNode {
 
 impl Node for WidthRatioNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let val = resolve_if_value(py, &self.val_expr, context);
-        let max_val = resolve_if_value(py, &self.max_expr, context);
-        let max_width_val = resolve_if_value(py, &self.max_width, context);
+        use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError, PyZeroDivisionError};
 
-        let max_width = match try_to_int(&max_width_val) {
-            Some(w) => w,
-            None => {
+        let builtins = py.import("builtins")?;
+        let resolved = (|| -> Result<_, TemplateError> {
+            let value = resolve_value(py, &self.val_expr, context)?;
+            let max_value = resolve_value(py, &self.max_expr, context)?;
+            let max_width = resolve_value(py, &self.max_width, context)?;
+            let max_width = builtins
+                .getattr("int")?
+                .call1((max_width.to_pyobject(py),))?;
+            Ok((value, max_value, max_width))
+        })();
+        let (value, max_value, max_width) = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) if is_variable_does_not_exist(py, &error) => return Ok(String::new()),
+            Err(TemplateError::PythonError(error))
+                if error.is_instance_of::<PyValueError>(py)
+                    || error.is_instance_of::<PyTypeError>(py) =>
+            {
                 return Err(TemplateError::TemplateSyntaxError(
                     "widthratio final argument must be a number".into(),
                 ));
             }
+            Err(error) => return Err(error),
         };
 
-        let val_f = match try_to_f64(&val) {
-            Some(f) => f,
-            None => return self.store_or_return("", context),
-        };
-        let max_f = match try_to_f64(&max_val) {
-            Some(f) => f,
-            None => return self.store_or_return("", context),
-        };
-
-        let result = if max_f == 0.0 {
-            "0".to_owned()
-        } else {
-            let ratio = val_f / max_f * max_width as f64;
-            if ratio.is_nan() || ratio.is_infinite() {
+        let computed = (|| -> PyResult<String> {
+            let float = builtins.getattr("float")?;
+            let value = float.call1((value.to_pyobject(py),))?;
+            let max_value = float.call1((max_value.to_pyobject(py),))?;
+            let ratio = value.div(max_value)?.mul(&max_width)?;
+            Ok(builtins
+                .getattr("round")?
+                .call1((ratio,))?
+                .str()?
+                .to_string())
+        })();
+        let result = match computed {
+            Ok(result) => result,
+            Err(error) if error.is_instance_of::<PyZeroDivisionError>(py) => "0".to_owned(),
+            Err(error)
+                if error.is_instance_of::<PyValueError>(py)
+                    || error.is_instance_of::<PyTypeError>(py)
+                    || error.is_instance_of::<PyOverflowError>(py) =>
+            {
                 String::new()
-            } else {
-                format!("{}", python_round(ratio))
             }
+            Err(error) => return Err(error.into()),
         };
-
         self.store_or_return(&result, context)
     }
 
@@ -1525,68 +1540,29 @@ impl WidthRatioNode {
     }
 }
 
-fn try_to_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Int(n) => Some(*n as f64),
-        Value::Float(f) => Some(*f),
-        Value::String(s) => s.parse::<f64>().ok(),
-        Value::SafeString(s) => s.parse::<f64>().ok(),
-        Value::Bool(true) => Some(1.0),
-        Value::Bool(false) => Some(0.0),
-        Value::None => None,
-        _ => None,
-    }
-}
-
-fn try_to_int(value: &Value) -> Option<i64> {
-    match value {
-        Value::Int(n) => Some(*n),
-        Value::Float(f) => Some(*f as i64),
-        Value::String(s) => s.parse::<i64>().ok(),
-        Value::SafeString(s) => s.parse::<i64>().ok(),
-        Value::Bool(true) => Some(1),
-        Value::Bool(false) => Some(0),
-        _ => None,
-    }
-}
-
-fn python_round(x: f64) -> i64 {
-    let r = x.round();
-    let ri = r as i64;
-    if (x.fract().abs() - 0.5).abs() < 1e-9 && ri % 2 != 0 {
-        ri - x.signum() as i64
-    } else {
-        ri
-    }
-}
-
-#[allow(dead_code)]
-fn value_to_f64(value: &Value) -> f64 {
-    try_to_f64(value).unwrap_or(0.0)
-}
-
 pub fn compile_widthratio(
     parser: &mut Parser,
     token: &Token,
 ) -> Result<Box<dyn Node>, TemplateError> {
-    // {% widthratio value max_value max_width [as var] %}
     let bits = token.split_contents();
-    if bits.len() < 4 {
-        return Err(TemplateError::TemplateSyntaxError(
-            "'widthratio' tag requires at least three arguments: value, max_value, max_width."
-                .into(),
-        ));
-    }
+    let asvar = match bits.len() {
+        4 => None,
+        6 if bits[4] == "as" => Some(bits[5].clone()),
+        6 => {
+            return Err(TemplateError::TemplateSyntaxError(
+                "Invalid syntax in widthratio tag. Expecting 'as' keyword".into(),
+            ));
+        }
+        _ => {
+            return Err(TemplateError::TemplateSyntaxError(
+                "widthratio takes at least three arguments".into(),
+            ));
+        }
+    };
 
     let val_expr = parser.compile_filter(&bits[1])?;
     let max_expr = parser.compile_filter(&bits[2])?;
     let max_width = parser.compile_filter(&bits[3])?;
-
-    let asvar = if bits.len() >= 6 && bits[4] == "as" {
-        Some(bits[5].clone())
-    } else {
-        None
-    };
 
     Ok(Box::new(WidthRatioNode {
         val_expr,
@@ -1615,22 +1591,22 @@ static IFCHANGED_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 
 impl Node for IfChangedNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        let current: String = if self.vars.is_empty() {
-            let safe = self.nodelist_true.render(py, context)?;
-            safe.as_str().to_owned()
+        let rendered_content = if self.vars.is_empty() {
+            Some(self.nodelist_true.render(py, context)?.as_str().to_owned())
         } else {
-            let mut parts = Vec::with_capacity(self.vars.len());
-            for fe in &self.vars {
-                let val = resolve_if_value(py, fe, context);
-                parts.push(val.to_string());
+            None
+        };
+        let current = match &rendered_content {
+            Some(content) => Value::String(content.clone()),
+            None => {
+                let mut values = Vec::with_capacity(self.vars.len());
+                for fe in &self.vars {
+                    values.push(resolve_value_ignore_failures(py, fe, context)?);
+                }
+                Value::List(values)
             }
-            parts.join("\x01") // separator unlikely to appear in values
         };
 
-        // Django stores ifchanged state in context['forloop'] when inside
-        // a for loop, so it resets on each iteration of the parent loop.
-        // Outside loops, it uses render_context (effectively a no-op since
-        // the state is bound to self).
         let (last_value, use_forloop) = if let Some(Value::Dict(forloop)) = context.get("forloop") {
             (forloop.get(self.render_key.as_str()).cloned(), true)
         } else {
@@ -1638,27 +1614,26 @@ impl Node for IfChangedNode {
         };
 
         let changed = match &last_value {
-            Some(Value::String(s)) => s != &current,
-            _ => true,
+            Some(previous) => !python_truthy(
+                py,
+                &compare_values(py, InfixOp::Eq, &current, previous, false)?,
+            )?,
+            None => true,
         };
 
-        // Store updated state
         if use_forloop {
             if let Some(Value::Dict(forloop)) = context.base.get_mut("forloop") {
-                forloop.insert(
-                    self.render_key.as_str().into(),
-                    Value::String(current.clone()),
-                );
+                forloop.insert(self.render_key.as_str().into(), current);
             }
         } else {
-            context
-                .render_context
-                .set(self.render_key.clone(), Value::String(current.clone()));
+            context.render_context.set(self.render_key.clone(), current);
         }
 
         if changed {
-            if self.vars.is_empty() {
-                Ok(current)
+            if let Some(content) = rendered_content
+                && !content.is_empty()
+            {
+                Ok(content)
             } else {
                 let safe = self.nodelist_true.render(py, context)?;
                 Ok(safe.as_str().to_owned())
@@ -2308,16 +2283,41 @@ mod tests {
     }
 
     #[test]
-    fn test_value_is_truthy() {
-        assert!(!value_is_truthy(&Value::None));
-        assert!(!value_is_truthy(&Value::Bool(false)));
-        assert!(value_is_truthy(&Value::Bool(true)));
-        assert!(!value_is_truthy(&Value::Int(0)));
-        assert!(value_is_truthy(&Value::Int(1)));
-        assert!(!value_is_truthy(&Value::String(String::new())));
-        assert!(value_is_truthy(&Value::String("x".into())));
-        assert!(!value_is_truthy(&Value::List(vec![])));
-        assert!(value_is_truthy(&Value::List(vec![Value::Int(1)])));
+    fn test_python_truthy() {
+        Python::attach(|py| {
+            let truthy = |value: Value| python_truthy(py, &value).unwrap();
+            assert!(!truthy(Value::None));
+            assert!(!truthy(Value::Bool(false)));
+            assert!(truthy(Value::Bool(true)));
+            assert!(!truthy(Value::Int(0)));
+            assert!(truthy(Value::Int(1)));
+            assert!(!truthy(Value::String(String::new())));
+            assert!(truthy(Value::String("x".into())));
+            assert!(!truthy(Value::List(vec![])));
+            assert!(truthy(Value::List(vec![Value::Int(1)])));
+        });
+    }
+
+    #[test]
+    fn test_native_comparison_matches_python() {
+        let s = |v: &str| Value::String(v.into());
+        assert_eq!(native_comparison(InfixOp::Lt, &s("a"), &s("b")), Some(true));
+        assert_eq!(
+            native_comparison(InfixOp::Eq, &Value::Bool(true), &Value::Int(1)),
+            Some(true)
+        );
+        assert_eq!(
+            native_comparison(InfixOp::Lt, &Value::Float(f64::NAN), &Value::Int(1)),
+            Some(false)
+        );
+        assert_eq!(
+            native_comparison(InfixOp::NotEq, &Value::Float(f64::NAN), &Value::Int(1)),
+            Some(true)
+        );
+        assert_eq!(
+            native_comparison(InfixOp::Eq, &s("1"), &Value::Int(1)),
+            None
+        );
     }
 
     #[test]
@@ -2527,16 +2527,5 @@ mod tests {
     fn test_partialdef_non_inline_empty() {
         let result = render("{% partialdef mypart %}hello{% endpartialdef %}", vec![]);
         assert_eq!(result.unwrap(), "");
-    }
-
-    #[test]
-    fn test_value_to_f64() {
-        assert_eq!(value_to_f64(&Value::Int(42)), 42.0);
-        assert_eq!(value_to_f64(&Value::Float(3.14)), 3.14);
-        assert_eq!(value_to_f64(&Value::String("10".into())), 10.0);
-        assert_eq!(value_to_f64(&Value::String("bad".into())), 0.0);
-        assert_eq!(value_to_f64(&Value::Bool(true)), 1.0);
-        assert_eq!(value_to_f64(&Value::Bool(false)), 0.0);
-        assert_eq!(value_to_f64(&Value::None), 0.0);
     }
 }

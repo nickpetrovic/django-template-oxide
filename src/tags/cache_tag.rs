@@ -3,7 +3,7 @@
 
 use pyo3::prelude::*;
 
-use crate::context::{Context, Value};
+use crate::context::Context;
 use crate::errors::TemplateError;
 use crate::impl_node_metadata;
 use crate::lexer::Token;
@@ -11,7 +11,7 @@ use crate::nodes::{Node, NodeList, Origin};
 use crate::parser::Parser;
 use crate::variable::FilterExpression;
 
-use super::resolve_if_value;
+use super::{is_variable_does_not_exist, resolve_value};
 
 #[derive(Debug)]
 pub struct CacheNode {
@@ -28,154 +28,102 @@ pub struct CacheNode {
 
 impl Node for CacheNode {
     fn render(&self, py: Python<'_>, context: &mut Context) -> Result<String, TemplateError> {
-        // Resolve timeout. Django raises TemplateSyntaxError if the variable
-        // doesn't exist or isn't an integer.
-        let timeout_result =
-            crate::nodes::resolve_expression_rust(py, &self.expire_time_expr, context);
-        let timeout_val = match timeout_result {
-            Ok(v) => v,
-            Err(TemplateError::VariableDoesNotExist { .. }) | Err(TemplateError::Internal(_)) => {
-                return Err(TemplateError::TemplateSyntaxError(format!(
-                    "\"cache\" tag got an unknown variable: {:?}",
-                    self.expire_time_expr
-                )));
-            }
-            Err(e) => return Err(e),
-        };
-
-        // Check for empty string_if_invalid result (variable not found)
-        if let Value::String(ref s) = timeout_val
-            && s.is_empty()
-        {
-            return Err(TemplateError::TemplateSyntaxError(format!(
-                "\"cache\" tag got an unknown variable: {:?}",
-                self.expire_time_expr
-            )));
-        }
-
-        let timeout: Option<i64> = match &timeout_val {
-            Value::Int(n) => Some(*n),
-            Value::Float(f) => Some(*f as i64),
-            Value::None => None,
-            Value::String(s) => match s.parse::<i64>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    return Err(TemplateError::TemplateSyntaxError(format!(
-                        "\"cache\" tag got a non-integer timeout value: {:?}",
-                        s
-                    )));
+        let unknown_variable = |fe: &FilterExpression| -> TemplateError {
+            let described = match &fe.var {
+                crate::variable::FilterExpressionVar::Var(variable) => {
+                    match pyo3::types::PyString::new(py, &variable.var).repr() {
+                        Ok(name) => format!("<Variable: {name}>"),
+                        Err(error) => return error.into(),
+                    }
                 }
-            },
-            Value::SafeString(s) => match s.parse::<i64>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    return Err(TemplateError::TemplateSyntaxError(format!(
-                        "\"cache\" tag got a non-integer timeout value: {:?}",
-                        s.as_ref()
-                    )));
+                crate::variable::FilterExpressionVar::Constant(Some(constant)) => {
+                    match pyo3::types::PyString::new(py, constant).repr() {
+                        Ok(text) => text.to_string(),
+                        Err(error) => return error.into(),
+                    }
                 }
-            },
-            _ => {
-                return Err(TemplateError::TemplateSyntaxError(format!(
-                    "\"cache\" tag got a non-integer timeout value: {:?}",
-                    timeout_val.to_string()
-                )));
-            }
-        };
-
-        // fragment_name is a raw string in Django (not compiled as filter)
-        let fragment_name = &self.fragment_name_str;
-
-        let vary_on: Vec<String> = self
-            .vary_on
-            .iter()
-            .map(|fe| {
-                let val = resolve_if_value(py, fe, context);
-                val.to_string()
-            })
-            .collect();
-
-        let cache_alias: Option<String> = match &self.cache_alias {
-            Some(fe) => {
-                let val = resolve_if_value(py, fe, context);
-                Some(val.to_string())
-            }
-            None => None,
-        };
-
-        let result: Result<String, TemplateError> = (|| {
-            let cache_utils = py.import("django.templatetags.cache").map_err(|e| {
-                TemplateError::Internal(format!("Cannot import django.templatetags.cache: {e}"))
-            })?;
-            let make_key = cache_utils
-                .getattr("make_template_fragment_key")
-                .map_err(|e| {
-                    TemplateError::Internal(format!("Cannot get make_template_fragment_key: {e}"))
-                })?;
-            let py_vary: Vec<&str> = vary_on.iter().map(|s| s.as_str()).collect();
-            let cache_key = make_key
-                .call1((fragment_name.as_str(), py_vary))
-                .map_err(|e| {
-                    TemplateError::Internal(format!("make_template_fragment_key failed: {e}"))
-                })?
-                .extract::<String>()
-                .map_err(|e| TemplateError::Internal(format!("cache key not a string: {e}")))?;
-
-            let caches = py
-                .import("django.core.cache")
-                .map_err(|e| {
-                    TemplateError::Internal(format!("Cannot import django.core.cache: {e}"))
-                })?
-                .getattr("caches")
-                .map_err(|e| TemplateError::Internal(format!("Cannot get caches: {e}")))?;
-
-            // Determine which cache to use:
-            // 1. If cache_alias is explicitly provided, use it
-            // 2. Otherwise try "template_fragments", fall back to "default"
-            let cache = if let Some(ref alias) = cache_alias {
-                caches.get_item(alias.as_str()).map_err(|_| {
-                    TemplateError::TemplateSyntaxError(format!(
-                        "Invalid cache name specified for cache tag: {:?}",
-                        alias
-                    ))
-                })?
-            } else {
-                match caches.get_item("template_fragments") {
-                    Ok(c) => c,
-                    Err(_) => caches.get_item("default").map_err(|e| {
-                        TemplateError::Internal(format!("Cannot get default cache: {e}"))
-                    })?,
-                }
+                crate::variable::FilterExpressionVar::Constant(None) => "None".to_owned(),
             };
-
-            let cached = cache
-                .call_method1("get", (cache_key.as_str(),))
-                .map_err(|e| TemplateError::Internal(format!("cache.get() failed: {e}")))?;
-
-            if !cached.is_none() {
-                return cached.extract::<String>().map_err(|e| {
-                    TemplateError::Internal(format!("cached value not a string: {e}"))
-                });
+            TemplateError::TemplateSyntaxError(format!(
+                "\"cache\" tag got an unknown variable: {described}"
+            ))
+        };
+        let builtins = py.import("builtins")?;
+        let expire_time = match resolve_value(py, &self.expire_time_expr, context) {
+            Ok(value) => value.to_pyobject(py).into_bound(py),
+            Err(error) if is_variable_does_not_exist(py, &error) => {
+                return Err(unknown_variable(&self.expire_time_expr));
             }
-
-            // Miss: render and cache.
-            let safe = self.nodelist.render(py, context)?;
-            let rendered = safe.as_str().to_owned();
-
-            if let Some(t) = timeout {
-                cache
-                    .call_method("set", (cache_key.as_str(), rendered.as_str(), t), None)
-                    .map_err(|e| TemplateError::Internal(format!("cache.set() failed: {e}")))?;
-            } else {
-                cache
-                    .call_method1("set", (cache_key.as_str(), rendered.as_str()))
-                    .map_err(|e| TemplateError::Internal(format!("cache.set() failed: {e}")))?;
+            Err(error) => return Err(error),
+        };
+        let expire_time = if expire_time.is_none() {
+            expire_time
+        } else {
+            match builtins.getattr("int")?.call1((&expire_time,)) {
+                Ok(seconds) => seconds,
+                Err(error)
+                    if error.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+                        || error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) =>
+                {
+                    return Err(TemplateError::TemplateSyntaxError(format!(
+                        "\"cache\" tag got a non-integer timeout value: {}",
+                        expire_time.repr()?
+                    )));
+                }
+                Err(error) => return Err(error.into()),
             }
+        };
 
-            Ok(rendered)
-        })();
+        let cache_module = py.import("django.core.cache")?;
+        let caches = cache_module.getattr("caches")?;
+        let invalid_backend = cache_module.getattr("InvalidCacheBackendError")?;
+        let fragment_cache = match &self.cache_alias {
+            Some(alias_expr) => {
+                let alias = match resolve_value(py, alias_expr, context) {
+                    Ok(alias) => alias.to_pyobject(py).into_bound(py),
+                    Err(error) if is_variable_does_not_exist(py, &error) => {
+                        return Err(unknown_variable(alias_expr));
+                    }
+                    Err(error) => return Err(error),
+                };
+                match caches.get_item(&alias) {
+                    Ok(cache) => cache,
+                    Err(error) if error.is_instance(py, &invalid_backend) => {
+                        return Err(TemplateError::TemplateSyntaxError(format!(
+                            "Invalid cache name specified for cache tag: {}",
+                            alias.repr()?
+                        )));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => match caches.get_item("template_fragments") {
+                Ok(cache) => cache,
+                Err(error) if error.is_instance(py, &invalid_backend) => {
+                    caches.get_item("default")?
+                }
+                Err(error) => return Err(error.into()),
+            },
+        };
 
-        result
+        let mut vary_on = Vec::with_capacity(self.vary_on.len());
+        for fe in &self.vary_on {
+            vary_on.push(resolve_value(py, fe, context)?.to_pyobject(py));
+        }
+        let cache_key = py
+            .import("django.core.cache.utils")?
+            .getattr("make_template_fragment_key")?
+            .call1((self.fragment_name_str.as_str(), vary_on))?;
+        let cached = fragment_cache.call_method1("get", (&cache_key,))?;
+        if !cached.is_none() {
+            return Ok(cached.str()?.to_string());
+        }
+        let rendered = self.nodelist.render(py, context)?;
+        let rendered = rendered.as_str().to_owned();
+        let dj = crate::python_cache::django(py)?;
+        let safe_value = dj.mark_safe.bind(py).call1((rendered.as_str(),))?;
+        fragment_cache.call_method1("set", (&cache_key, safe_value, expire_time))?;
+        Ok(rendered)
     }
 
     impl_node_metadata!();
@@ -196,13 +144,14 @@ pub fn compile_cache(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>
 
     let bits = token.split_contents();
     if bits.len() < 3 {
+        let tag_repr = Python::attach(|py| -> PyResult<String> {
+            Ok(pyo3::types::PyString::new(py, &bits[0]).repr()?.to_string())
+        })?;
         return Err(TemplateError::TemplateSyntaxError(format!(
-            "'{:?}' tag requires at least 2 arguments.",
-            bits.first().unwrap_or(&String::new())
+            "'{tag_repr}' tag requires at least 2 arguments."
         )));
     }
 
-    // Check if last token starts with "using=" (Django's syntax)
     let mut cache_alias = None;
     let mut end = bits.len();
     if bits.len() > 3 {
@@ -214,7 +163,6 @@ pub fn compile_cache(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>
     }
 
     let expire_time_expr = parser.compile_filter(&bits[1])?;
-    // fragment_name is a raw string, not compiled as a filter expression
     let fragment_name_str = bits[2].clone();
 
     let mut vary_on = Vec::new();

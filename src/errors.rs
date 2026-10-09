@@ -45,6 +45,30 @@ pub enum TemplateError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error(
+        "sequence item {}: expected str instance, {type_name} found",
+        index.unwrap_or(0)
+    )]
+    NodeOutputNotString {
+        index: Option<usize>,
+        type_name: String,
+    },
+}
+
+impl TemplateError {
+    pub fn at_node_index(self, node_index: usize) -> Self {
+        match self {
+            Self::NodeOutputNotString {
+                index: None,
+                type_name,
+            } => Self::NodeOutputNotString {
+                index: Some(node_index),
+                type_name,
+            },
+            other => other,
+        }
+    }
 }
 
 impl Clone for TemplateError {
@@ -62,6 +86,10 @@ impl Clone for TemplateError {
             },
             Self::PythonError(e) => Self::PythonError(Python::attach(|py| e.clone_ref(py))),
             Self::Internal(s) => Self::Internal(s.clone()),
+            Self::NodeOutputNotString { index, type_name } => Self::NodeOutputNotString {
+                index: *index,
+                type_name: type_name.clone(),
+            },
         }
     }
 }
@@ -108,12 +136,16 @@ impl From<TemplateError> for PyErr {
         match err {
             TemplateError::PythonError(e) => e,
             TemplateError::Internal(msg) => pyo3::exceptions::PyRuntimeError::new_err(msg),
+            not_string @ TemplateError::NodeOutputNotString { .. } => {
+                pyo3::exceptions::PyTypeError::new_err(not_string.to_string())
+            }
             other => Python::attach(|py| match crate::python_cache::django(py) {
                 Ok(dj) => {
                     let (cls, msg) = match &other {
-                        TemplateError::VariableDoesNotExist { .. } => {
-                            (&dj.variable_does_not_exist_cls, other.to_string())
-                        }
+                        TemplateError::VariableDoesNotExist { .. } => (
+                            &dj.variable_does_not_exist_cls,
+                            other.to_string().replace('%', "%%"),
+                        ),
                         TemplateError::TemplateSyntaxError(m) => {
                             (&dj.template_syntax_error_cls, m.clone())
                         }

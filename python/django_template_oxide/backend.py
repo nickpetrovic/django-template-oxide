@@ -33,7 +33,6 @@ auto-escape rules, context-processor pipeline), the
 from django.template import TemplateDoesNotExist
 from django.template.backends.django import DjangoTemplates, copy_exception, reraise
 from django.template.context import make_context
-from django.utils.safestring import mark_safe
 
 try:
     from django.test.signals import template_rendered
@@ -163,19 +162,6 @@ class OxideTemplateAdapter:
 
     Same API surface as :class:`django.template.backends.django.Template`:
     ``.origin`` and ``.render(context=None, request=None) -> str``.
-
-    Render path:
-      1. Builds a Django Context via :func:`make_context` (handles
-         autoescape, RequestContext context processors).
-      2. Converts the Django Context to a Rust :class:`Context` by
-         flattening the dict stack.
-      3. Calls Rust ``Template.render`` which iterates the Rust AST.
-
-    Custom Python nodes/filters encountered during render call back
-    into Python via PyOpaqueNode / call_python_filter, passing the Rust
-    Context (which exposes the full Django Context API). Mutations
-    from Python nodes propagate back through the
-    ``render_with_borrowed_context`` mem::swap bridge.
     """
 
     def __init__(self, rust_template, backend, name=None, origin=None):
@@ -195,25 +181,6 @@ class OxideTemplateAdapter:
         )
 
     def render(self, context=None, request=None):
-        # Fast path: a plain dict (or None) with no request skips the
-        # entire Django Context wrapping ceremony. About a 3x wall-clock
-        # speedup on tiny templates (FOR EMPTY ~4.5us -> ~1.5us).
-        #
-        # Skipped work:
-        #   - `make_context(dict, None, autoescape)` (~1us).
-        #   - `push_state(self)` + `bind_template(self)` (~1us). The
-        #     Rust side does its own template-binding via
-        #     `rust_context.template = ...`. We re-enter the slow path
-        #     below when a Django/RequestContext is passed.
-        #   - `dj_ctx.flatten()` + `_RustContext(flat, ...)` (~1us).
-        #     Rust `Template.render` accepts a plain dict via
-        #     py_bindings.rs:957-964.
-        #
-        # SAFETY: we still need `render_context.push_state(self)` for
-        # any custom tag using `context.render_context[self]` (the
-        # {% cycle %} pattern). The Rust render path emulates this via
-        # its own per-render `RenderContext::push_state`; see
-        # context.rs RenderContext.
         if request is None and (context is None or type(context) is dict):
             if template_rendered is not None and template_rendered.receivers:
                 from django.template import Context as DjContext
@@ -222,11 +189,10 @@ class OxideTemplateAdapter:
                     context=DjContext(context or {}),
                 )
             try:
-                return mark_safe(self.template.render(context))
+                return self.template.render_safe(context)
             except TemplateDoesNotExist as exc:
                 reraise(exc, self.backend)
 
-        # Slow path: RequestContext, Django Context, or anything exotic.
         dj_ctx = make_context(
             context, request, autoescape=self.backend.engine.autoescape
         )
@@ -253,8 +219,9 @@ class OxideTemplateAdapter:
             use_l10n=getattr(dj_ctx, "use_l10n", None),
             use_tz=getattr(dj_ctx, "use_tz", None),
             string_if_invalid=self.backend.engine.string_if_invalid or None,
+            request=getattr(dj_ctx, "request", None),
         )
-        return mark_safe(self.template.render(rust_ctx))
+        return self.template.render_safe(rust_ctx)
 
     @property
     def engine(self):

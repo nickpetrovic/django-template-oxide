@@ -14,9 +14,6 @@ pub struct DjangoModules {
     pub text_node_cls: Py<PyAny>,
     pub node_cls: Py<PyAny>,
     pub origin_cls: Py<PyAny>,
-    pub render_value_in_context: Py<PyAny>,
-
-    pub context_cls: Py<PyAny>,
 
     pub template_syntax_error_cls: Py<PyAny>,
     pub template_does_not_exist_cls: Py<PyAny>,
@@ -31,16 +28,29 @@ pub struct DjangoModules {
     pub pgettext_lazy: Py<PyAny>,
 
     pub template_localtime: Py<PyAny>,
+
+    pub safe_string_cls: Py<PyAny>,
+    pub localize: Py<PyAny>,
+    pub settings: Py<PyAny>,
+    pub builtin_filters: Py<PyAny>,
+    pub get_language: Py<PyAny>,
+    pub gettext: Py<PyAny>,
+    pub dates: Py<PyAny>,
+    pub decimal_cls: Py<PyAny>,
+    pub get_format: Py<PyAny>,
+    pub trans_real: Py<PyAny>,
 }
 
 impl DjangoModules {
     fn init(py: Python<'_>) -> PyResult<Self> {
         let base = py.import("django.template.base")?;
-        let ctx = py.import("django.template.context")?;
         let exc = py.import("django.template.exceptions")?;
         let ss = py.import("django.utils.safestring")?;
         let tr = py.import("django.utils.translation")?;
         let tz = py.import("django.utils.timezone")?;
+        let formats = py.import("django.utils.formats")?;
+        let conf = py.import("django.conf")?;
+        let defaultfilters = py.import("django.template.defaultfilters")?;
 
         let variable_does_not_exist_cls = base.getattr("VariableDoesNotExist")?.unbind();
 
@@ -50,10 +60,7 @@ impl DjangoModules {
             text_node_cls: base.getattr("TextNode")?.unbind(),
             node_cls: base.getattr("Node")?.unbind(),
             origin_cls: base.getattr("Origin")?.unbind(),
-            render_value_in_context: base.getattr("render_value_in_context")?.unbind(),
             template_base: base.into_any().unbind(),
-
-            context_cls: ctx.getattr("Context")?.unbind(),
 
             template_syntax_error_cls: exc.getattr("TemplateSyntaxError")?.unbind(),
             template_does_not_exist_cls: exc.getattr("TemplateDoesNotExist")?.unbind(),
@@ -61,13 +68,29 @@ impl DjangoModules {
 
             mark_safe: ss.getattr("mark_safe")?.unbind(),
             safe_data_cls: ss.getattr("SafeData")?.unbind(),
+            safe_string_cls: ss.getattr("SafeString")?.unbind(),
             safestring: ss.into_any().unbind(),
 
             gettext_lazy: tr.getattr("gettext_lazy")?.unbind(),
             pgettext_lazy: tr.getattr("pgettext_lazy")?.unbind(),
+            get_language: tr.getattr("get_language")?.unbind(),
+            gettext: tr.getattr("gettext")?.unbind(),
             translation: tr.into_any().unbind(),
 
             template_localtime: tz.getattr("template_localtime")?.unbind(),
+            localize: formats.getattr("localize")?.unbind(),
+            settings: conf.getattr("settings")?.unbind(),
+            builtin_filters: defaultfilters
+                .getattr("register")?
+                .getattr("filters")?
+                .unbind(),
+            dates: py.import("django.utils.dates")?.into_any().unbind(),
+            decimal_cls: py.import("decimal")?.getattr("Decimal")?.unbind(),
+            get_format: formats.getattr("get_format")?.unbind(),
+            trans_real: py
+                .import("django.utils.translation.trans_real")?
+                .into_any()
+                .unbind(),
         })
     }
 }

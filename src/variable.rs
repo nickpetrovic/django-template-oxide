@@ -41,6 +41,7 @@ static FILTER_RE: Lazy<Regex> =
 #[derive(Debug, Clone)]
 enum VariableValue {
     Int(i64),
+    BigInt(String),
     Float(f64),
     /// String literal (unescaped); will be mark_safe'd by Django.
     StringLiteral(String),
@@ -155,6 +156,7 @@ impl Variable {
     ) -> PyResult<Bound<'py, PyAny>> {
         let value = match &self.value {
             VariableValue::Int(n) => n.into_pyobject(py)?.into_any(),
+            VariableValue::BigInt(text) => py.get_type::<pyo3::types::PyInt>().call1((text,))?,
             VariableValue::Float(f) => f.into_pyobject(py)?.into_any(),
             VariableValue::StringLiteral(s) => {
                 // mark_safe per Django.
@@ -385,6 +387,13 @@ impl Variable {
         }
     }
 
+    pub fn as_big_int_literal(&self) -> Option<&str> {
+        match &self.value {
+            VariableValue::BigInt(text) => Some(text),
+            _ => None,
+        }
+    }
+
     /// `parts[1..].join(".")`, or `None` for ≤1-segment / literal vars.
     #[inline]
     pub fn lookup_rest(&self) -> Option<&str> {
@@ -504,19 +513,42 @@ fn repr_py(obj: &Bound<'_, PyAny>) -> String {
 
 /// Parse `var` per Django: float if it contains `.` or `e`/`E` (reject
 /// trailing dot), else int. `None` on failure.
+fn without_digit_separators(var: &str) -> Option<String> {
+    let bytes = var.as_bytes();
+    let mut cleaned = String::with_capacity(var.len());
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'_' {
+            let after_digit = index > 0 && bytes[index - 1].is_ascii_digit();
+            let before_digit = bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
+            if !(after_digit && before_digit) {
+                return None;
+            }
+        } else {
+            cleaned.push(byte as char);
+        }
+    }
+    Some(cleaned)
+}
+
 fn try_parse_number(var: &str) -> Option<VariableValue> {
-    if var.is_empty() {
+    if var.is_empty() || !var.is_ascii() {
         return None;
     }
-
-    let lower = var.to_ascii_lowercase();
-    if var.contains('.') || lower.contains('e') {
+    let cleaned = without_digit_separators(var)?;
+    if var.contains('.') || var.contains(['e', 'E']) {
         if var.ends_with('.') {
             return None;
         }
-        var.parse::<f64>().ok().map(VariableValue::Float)
+        cleaned.parse::<f64>().ok().map(VariableValue::Float)
     } else {
-        var.parse::<i64>().ok().map(VariableValue::Int)
+        let digits = cleaned.strip_prefix(['+', '-']).unwrap_or(&cleaned);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(match cleaned.parse::<i64>() {
+            Ok(n) => VariableValue::Int(n),
+            Err(_) => VariableValue::BigInt(cleaned),
+        })
     }
 }
 
@@ -587,6 +619,15 @@ pub struct FilterExpression {
     /// clones don't need the GIL. Tag arg paths that don't carry their
     /// own slice (`{% with %}`, `{% if %}` args, etc.) read from here.
     pub filter_funcs: std::sync::Arc<Vec<pyo3::Py<pyo3::PyAny>>>,
+    pub natives: std::sync::Arc<Vec<Option<NativeFilterRef>>>,
+}
+
+pub type NativeFilterRef = &'static crate::filters::NativeFilter;
+
+impl std::fmt::Debug for crate::filters::NativeFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NativeFilter({})", self.name)
+    }
 }
 
 /// Head of a `FilterExpression`.
@@ -599,8 +640,6 @@ pub enum FilterExpressionVar {
 }
 
 impl FilterExpression {
-    /// Mirrors `FilterExpression.__init__`. `find_filter` resolves
-    /// names to Python functions and validates `args_check`.
     pub fn parse<F>(token: &str, mut find_filter: F) -> Result<Self, TemplateError>
     where
         F: FnMut(&str) -> Result<ParsedFilter, TemplateError>,
@@ -641,7 +680,9 @@ impl FilterExpression {
                                         is_var = false;
                                     }
                                 }
-                                VariableValue::Int(_) | VariableValue::Float(_) => {
+                                VariableValue::Int(_)
+                                | VariableValue::BigInt(_)
+                                | VariableValue::Float(_) => {
                                     var_obj = Some(FilterExpressionVar::Var(v));
                                     is_var = true;
                                 }
@@ -734,6 +775,7 @@ impl FilterExpression {
             // Populated by `Parser::compile_filter`; left empty here so
             // `parse` stays Python-free for tests.
             filter_funcs: std::sync::Arc::new(Vec::new()),
+            natives: std::sync::Arc::new(Vec::new()),
         })
     }
 

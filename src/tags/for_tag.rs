@@ -14,7 +14,6 @@ use crate::parser::Parser;
 use crate::variable::FilterExpression;
 
 use super::IfNode;
-use super::resolve_if_value;
 
 #[derive(Debug)]
 pub struct ForNode {
@@ -214,14 +213,6 @@ fn collect_loopvar_paths(
                 visit_filter_expression(&vn.filter_expression, loopvar, paths, path_to_slot);
             }
             NodeEntry::Boxed(node) => {
-                // IfNode: walk only the branch bodies, NOT their
-                // conditions. Conditions are evaluated by the dynamic
-                // resolver - including them in the batch would force
-                // every iteration to pre-resolve them, and if any
-                // condition variable is missing (e.g.
-                // Don't poison the batch: a missing attr on any item
-                // makes attrgetter raise AttributeError, fallback
-                // applies for the whole body.
                 if let Some(if_node) = node.as_any().downcast_ref::<IfNode>() {
                     for branch in &if_node.branches {
                         collect_loopvar_paths(&branch.nodelist, loopvar, paths, path_to_slot);
@@ -311,23 +302,41 @@ fn visit_filter_expression(
     }
 }
 
-fn sequence_known_empty(py: Python<'_>, seq_value: &Value) -> bool {
-    match seq_value {
-        Value::List(items) => items.is_empty(),
-        Value::String(s) => s.is_empty(),
-        Value::SafeString(s) => s.is_empty(),
-        Value::PyObject(obj) => {
-            let bound = obj.bind(py);
-            if let Ok(list) = bound.cast::<pyo3::types::PyList>() {
-                list.is_empty()
-            } else if let Ok(tuple) = bound.cast::<pyo3::types::PyTuple>() {
-                tuple.is_empty()
-            } else {
-                bound.len().is_ok_and(|n| n == 0)
+fn unpack_item(py: Python<'_>, item: &Value, count: usize) -> Result<Vec<Value>, TemplateError> {
+    let unpack_error = |got: usize| {
+        TemplateError::PythonError(pyo3::exceptions::PyValueError::new_err(format!(
+            "Need {count} values to unpack in for loop; got {got}. "
+        )))
+    };
+    let parts: Vec<Value> = match item {
+        Value::List(items) => items.clone(),
+        Value::String(_) | Value::SafeString(_) => item
+            .as_str()
+            .expect("string variant")
+            .chars()
+            .map(|c| Value::String(c.to_string()))
+            .collect(),
+        other => {
+            let obj = other.to_pyobject(py).into_bound(py);
+            let length = match obj.len() {
+                Ok(length) => length,
+                Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => 1,
+                Err(error) => return Err(error.into()),
+            };
+            if length != count {
+                return Err(unpack_error(length));
             }
+            let mut parts = Vec::with_capacity(count);
+            for part in obj.try_iter()?.take(count) {
+                parts.push(crate::nodes::value_from_pyany_fast(&part?));
+            }
+            return Ok(parts);
         }
-        _ => true,
+    };
+    if parts.len() != count {
+        return Err(unpack_error(parts.len()));
     }
+    Ok(parts)
 }
 
 impl ForNode {
@@ -339,24 +348,46 @@ impl ForNode {
         out: &mut String,
     ) -> Result<(), TemplateError> {
         let _g = crate::prof::Guard::new("ForNode::render");
-        let seq_value = resolve_if_value(py, &self.sequence, context);
+        let seq_value = super::resolve_value_ignore_failures(py, &self.sequence, context)?;
 
-        if let Some(ref empty_nodelist) = self.nodelist_empty
-            && sequence_known_empty(py, &seq_value)
-        {
-            return empty_nodelist.render_into(py, context, out);
+        let mut python_sequence = None;
+        let len_values = match &seq_value {
+            Value::None => 0,
+            Value::List(items) => items.len(),
+            Value::String(s) => s.chars().count(),
+            Value::SafeString(s) => s.chars().count(),
+            other => {
+                let mut sequence = other.to_pyobject(py).into_bound(py);
+                if !sequence.is_exact_instance_of::<pyo3::types::PyList>()
+                    && !sequence.is_exact_instance_of::<pyo3::types::PyTuple>()
+                    && !sequence.hasattr(pyo3::intern!(py, "__len__"))?
+                {
+                    sequence = py.get_type::<pyo3::types::PyList>().call1((sequence,))?;
+                }
+                let len = sequence.len()?;
+                python_sequence = Some(sequence);
+                len
+            }
+        };
+
+        if len_values == 0 {
+            if let Some(ref empty_nodelist) = self.nodelist_empty {
+                return empty_nodelist.render_into(py, context, out);
+            }
+            return Ok(());
         }
 
-        let items: Vec<Value> = match &seq_value {
-            Value::List(items) => {
+        let mut batch_source = None;
+        let items: Vec<Value> = match (&seq_value, python_sequence) {
+            (Value::List(items), _) => {
                 if self.is_reversed {
                     items.iter().rev().cloned().collect()
                 } else {
                     items.clone()
                 }
             }
-            v @ (Value::String(_) | Value::SafeString(_)) => {
-                let s = v.as_str().expect("matched String or SafeString");
+            (Value::String(_) | Value::SafeString(_), _) => {
+                let s = seq_value.as_str().expect("matched String or SafeString");
                 let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
                 if self.is_reversed {
                     chars.into_iter().rev().collect()
@@ -364,63 +395,40 @@ impl ForNode {
                     chars
                 }
             }
-            Value::PyObject(obj) => {
-                let bound = obj.bind(py);
-                if let Ok(iter) = bound.try_iter() {
-                    let mut result = Vec::new();
-                    // Exact-type fast paths skip Value::from's __html__
-                    // FFI for each model instance in a queryset.
-                    use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
-                    for item in iter.flatten() {
-                        let v = if item.is_exact_instance_of::<PyBool>() {
-                            Value::Bool(item.extract::<bool>().unwrap_or(false))
-                        } else if item.is_exact_instance_of::<PyInt>() {
-                            match item.extract::<i64>() {
-                                Ok(n) => Value::Int(n),
-                                Err(_) => Value::PyObject(item.unbind()),
-                            }
-                        } else if item.is_exact_instance_of::<PyFloat>() {
-                            match item.extract::<f64>() {
-                                Ok(f) => Value::Float(f),
-                                Err(_) => Value::PyObject(item.unbind()),
-                            }
-                        } else if item.is_exact_instance_of::<PyString>() {
-                            match item.extract::<String>() {
-                                Ok(s) => Value::String(s),
-                                Err(_) => Value::PyObject(item.unbind()),
-                            }
-                        } else if item.is_none() {
-                            Value::None
+            (_, Some(sequence)) => {
+                let iterated = match sequence.cast_exact::<pyo3::types::PyList>() {
+                    Ok(list) if !self.is_reversed => list.clone(),
+                    _ => {
+                        let source = if self.is_reversed {
+                            py.import("builtins")?
+                                .getattr(pyo3::intern!(py, "reversed"))?
+                                .call1((&sequence,))?
                         } else {
-                            // Opaque: model instances, dicts/lists,
-                            // SafeString (str subclass), custom classes.
-                            Value::PyObject(item.unbind())
+                            sequence
                         };
-                        result.push(v);
+                        py.get_type::<pyo3::types::PyList>()
+                            .call1((source,))?
+                            .cast_into::<pyo3::types::PyList>()
+                            .map_err(pyo3::PyErr::from)?
                     }
-                    if self.is_reversed {
-                        result.reverse();
-                    }
-                    result
-                } else {
-                    Vec::new()
-                }
+                };
+                let items = iterated
+                    .iter()
+                    .map(|item| crate::nodes::value_from_pyany_fast(&item))
+                    .collect();
+                batch_source = Some(iterated);
+                items
             }
-            _ => Vec::new(),
+            (_, None) => Vec::new(),
         };
-
-        if items.is_empty() {
-            if let Some(ref empty_nodelist) = self.nodelist_empty {
-                return empty_nodelist.render_into(py, context, out);
-            }
-            return Ok(());
-        }
+        crate::filters::invalidate_locale_snapshot();
 
         out.reserve(items.len() * 32);
 
         context.push();
         let outer_batch_cache = context.loop_batch_cache.take();
-        let outcome = self.render_iterations(py, context, out, items, &seq_value);
+        let outcome =
+            self.render_iterations(py, context, out, items, len_values, batch_source.as_ref());
         context.loop_batch_cache = outer_batch_cache;
         context.pop();
         outcome
@@ -432,29 +440,28 @@ impl ForNode {
         context: &mut Context,
         out: &mut String,
         items: Vec<Value>,
-        seq_value: &Value,
+        len_values: usize,
+        batch_source: Option<&Bound<'_, pyo3::types::PyList>>,
     ) -> Result<(), TemplateError> {
-        let len = items.len();
+        let len = len_values as i64;
 
         if self.body_uses_forloop {
-            let parentloop = context.get("forloop").cloned();
+            let parentloop = context
+                .get("forloop")
+                .cloned()
+                .unwrap_or_else(|| Value::Dict(Default::default()));
 
-            // Build once, mutate in place per iteration via index access.
-            // Fixed order: 0 counter, 1 counter0, 2 revcounter,
-            // 3 revcounter0, 4 first, 5 last, 6 length, [7 parentloop].
             let mut forloop =
                 crate::context::ValueMap::with_capacity_and_hasher(8, Default::default());
             use compact_str::CompactString;
-            forloop.insert(CompactString::const_new("counter"), Value::Int(0));
+            forloop.insert(CompactString::const_new("parentloop"), parentloop);
+            forloop.insert(CompactString::const_new("length"), Value::Int(len));
             forloop.insert(CompactString::const_new("counter0"), Value::Int(0));
+            forloop.insert(CompactString::const_new("counter"), Value::Int(0));
             forloop.insert(CompactString::const_new("revcounter"), Value::Int(0));
             forloop.insert(CompactString::const_new("revcounter0"), Value::Int(0));
             forloop.insert(CompactString::const_new("first"), Value::Bool(false));
             forloop.insert(CompactString::const_new("last"), Value::Bool(false));
-            forloop.insert(CompactString::const_new("length"), Value::Int(len as i64));
-            if let Some(ref pl) = parentloop {
-                forloop.insert(CompactString::const_new("parentloop"), pl.clone());
-            }
             context.set("forloop".to_owned(), Value::Dict(forloop));
         }
 
@@ -464,26 +471,19 @@ impl ForNode {
             None
         };
 
-        // Pre-extract via `list(map(attrgetter, iterable))`: one FFI
-        // hop covering N items × M attrs. Source iterable used
-        // directly (no PyList::append per item).
         let pre_extracted: Option<Vec<Py<pyo3::PyAny>>> =
-            match (single_loopvar.as_ref(), &self.batch_plan, seq_value) {
-                (Some(_), Some(plan), Value::PyObject(obj)) => {
-                    let bound = obj.bind(py);
-                    // Skip batching for the rare reversed-loop case
-                    // (alignment would require reversing iterable or result).
-                    if self.is_reversed {
-                        None
-                    } else {
-                        prebatch_extract_from_iterable(py, plan, bound, &context.string_if_invalid)
-                            .ok()
-                    }
-                }
+            match (single_loopvar.as_ref(), &self.batch_plan, batch_source) {
+                (Some(_), Some(plan), Some(source)) => prebatch_extract_from_iterable(
+                    py,
+                    plan,
+                    source.as_any(),
+                    &context.string_if_invalid,
+                )
+                .ok(),
                 _ => None,
             };
+        crate::filters::invalidate_locale_snapshot();
 
-        // Install the cache once; only `current_tuple` changes per iter.
         if let (Some(pre), Some(plan), Some(name)) = (
             pre_extracted.as_ref(),
             self.batch_plan.as_ref(),
@@ -497,177 +497,64 @@ impl ForNode {
             });
         }
 
-        // Pre-compute filtered columns: each `{{ x|filter:"arg" }}` in
-        // the body applies once per row in a tight Rust loop. Empty
-        // when there's no body program or no filtered columns.
-        let mut pre_columns: Vec<Vec<crate::context::Value>> = Vec::new();
+        let mut pre_columns: Vec<Vec<Option<crate::context::Value>>> = Vec::new();
         if let (Some(pre), Some(name)) = (pre_extracted.as_ref(), single_loopvar.as_ref()) {
-            let _ = name;
             let program_slot = self.body_program.get_or_init(|| {
-                if let Some(name) = single_loopvar.as_ref() {
-                    crate::body_program::compile_body_program(name, &self.nodelist_loop)
-                } else {
-                    None
-                }
+                crate::body_program::compile_body_program(name, &self.nodelist_loop)
             });
             if let Some(program) = program_slot.as_ref()
                 && program.has_columns()
             {
-                pre_columns = program.precompute_columns(py, pre, context.autoescape);
+                pre_columns =
+                    program.precompute_columns(py, pre, context.autoescape, context.use_tz);
             }
         }
+        let column_refs: Vec<&[Option<crate::context::Value>]> =
+            pre_columns.iter().map(Vec::as_slice).collect();
 
-        for (i, item) in items.into_iter().enumerate() {
+        for (index, item) in items.into_iter().enumerate() {
+            let i = index as i64;
             if self.body_uses_forloop
                 && let Some(Value::Dict(forloop)) = context.get_in_topmost_mut("forloop")
             {
-                if let Some((_, v)) = forloop.get_index_mut(0) {
-                    *v = Value::Int((i + 1) as i64);
-                }
-                if let Some((_, v)) = forloop.get_index_mut(1) {
-                    *v = Value::Int(i as i64);
-                }
-                if let Some((_, v)) = forloop.get_index_mut(2) {
-                    *v = Value::Int((len - i) as i64);
-                }
-                if let Some((_, v)) = forloop.get_index_mut(3) {
-                    *v = Value::Int((len - i - 1) as i64);
-                }
-                if let Some((_, v)) = forloop.get_index_mut(4) {
-                    *v = Value::Bool(i == 0);
-                }
-                if let Some((_, v)) = forloop.get_index_mut(5) {
-                    *v = Value::Bool(i == len - 1);
+                let counters = [
+                    Value::Int(i),
+                    Value::Int(i + 1),
+                    Value::Int(len - i),
+                    Value::Int(len - i - 1),
+                    Value::Bool(i == 0),
+                    Value::Bool(i == len - 1),
+                ];
+                for (offset, counter) in counters.into_iter().enumerate() {
+                    if let Some((_, slot)) = forloop.get_index_mut(2 + offset) {
+                        *slot = counter;
+                    }
                 }
             }
 
             if let Some(ref name) = single_loopvar {
-                // Update only `current_tuple`; loopvar/path_to_slot
-                // stay loop-invariant.
                 if let Some(pre) = pre_extracted.as_ref()
                     && let (Some(tuple), Some(cache)) =
-                        (pre.get(i), context.loop_batch_cache.as_mut())
+                        (pre.get(index), context.loop_batch_cache.as_mut())
                 {
                     cache.current_tuple = tuple.clone_ref(py);
                 }
                 context.set(name.clone(), item);
             } else {
-                // Tuple unpacking: `Value::List` direct-index, PyObject
-                // via __getitem__, anything else binds None per loopvar.
-                let num_loopvars = self.loopvars.len();
-                match &item {
-                    Value::List(sub_items) => {
-                        if sub_items.len() != num_loopvars {
-                            return Err(TemplateError::PythonError(
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "Need {} values to unpack in for loop; got {}.",
-                                    num_loopvars,
-                                    sub_items.len(),
-                                )),
-                            ));
-                        }
-                        for (j, var_name) in self.loopvars.iter().enumerate() {
-                            let val = sub_items.get(j).cloned().unwrap_or(Value::None);
-                            context.set(var_name.clone(), val);
-                        }
-                    }
-                    Value::String(s) => {
-                        // String unpacking: iterate characters
-                        let chars: Vec<Value> =
-                            s.chars().map(|c| Value::String(c.to_string())).collect();
-                        if chars.len() != num_loopvars {
-                            return Err(TemplateError::PythonError(
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "Need {} values to unpack in for loop; got {}.",
-                                    num_loopvars,
-                                    chars.len(),
-                                )),
-                            ));
-                        }
-                        for (j, var_name) in self.loopvars.iter().enumerate() {
-                            context.set(var_name.clone(), chars[j].clone());
-                        }
-                    }
-                    Value::SafeString(s) => {
-                        let chars: Vec<Value> =
-                            s.chars().map(|c| Value::String(c.to_string())).collect();
-                        if chars.len() != num_loopvars {
-                            return Err(TemplateError::PythonError(
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "Need {} values to unpack in for loop; got {}.",
-                                    num_loopvars,
-                                    chars.len(),
-                                )),
-                            ));
-                        }
-                        for (j, var_name) in self.loopvars.iter().enumerate() {
-                            context.set(var_name.clone(), chars[j].clone());
-                        }
-                    }
-                    Value::PyObject(obj) => {
-                        let bound = obj.bind(py);
-                        // Collect all items first to validate count
-                        let mut unpacked = Vec::new();
-                        if let Ok(iter) = bound.try_iter() {
-                            for item in iter.flatten() {
-                                unpacked.push(Value::from(&item));
-                            }
-                        } else {
-                            // Try __getitem__ for sequences
-                            let mut j = 0;
-                            loop {
-                                match bound.get_item(j) {
-                                    Ok(v) => unpacked.push(Value::from(&v)),
-                                    Err(_) => break,
-                                }
-                                j += 1;
-                            }
-                        }
-                        if unpacked.len() != num_loopvars {
-                            return Err(TemplateError::PythonError(
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "Need {} values to unpack in for loop; got {}.",
-                                    num_loopvars,
-                                    unpacked.len(),
-                                )),
-                            ));
-                        }
-                        for (j, var_name) in self.loopvars.iter().enumerate() {
-                            context.set(var_name.clone(), unpacked[j].clone());
-                        }
-                    }
-                    Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::None => {
-                        // Non-iterable: cannot unpack
-                        return Err(TemplateError::PythonError(
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "Need {} values to unpack in for loop; got 1.",
-                                num_loopvars,
-                            )),
-                        ));
-                    }
-                    Value::Dict(_) => {
-                        // Dict unpacking: iterate keys like Python
-                        for var_name in self.loopvars.iter() {
-                            context.set(var_name.clone(), Value::None);
-                        }
-                    }
-                }
+                let unpacked = unpack_item(py, &item, self.loopvars.len())?;
+                let layer: crate::context::ContextDict =
+                    self.loopvars.iter().cloned().zip(unpacked).collect();
+                context.push_with(layer);
+                let rendered = self.nodelist_loop.render_into(py, context, out);
+                context.pop();
+                rendered?;
+                continue;
             }
 
-            // Hot path: if the body has been compiled into a
-            // `BodyProgram` and the batch cache is active, dispatch
-            // through the opcode interpreter. Falls back to the
-            // generic NodeList walk for non-batched loops, unspecialised
-            // bodies, or empty iterables.
             let used_program = if context.loop_batch_cache.is_some() {
                 let program_slot = self.body_program.get();
                 if let Some(Some(program)) = program_slot {
-                    // Build the &[&[Value]] view over pre_columns once,
-                    // outside the inner loop body, to keep the call
-                    // signature simple and avoid per-iter allocation.
-                    let column_refs: Vec<&[crate::context::Value]> =
-                        pre_columns.iter().map(|v| v.as_slice()).collect();
-                    program.run(py, context, out, &self.nodelist_loop, &column_refs, i)?;
+                    program.run(py, context, out, &self.nodelist_loop, &column_refs, index)?;
                     true
                 } else {
                     false
@@ -794,19 +681,18 @@ pub fn compile_for(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>, 
     }))
 }
 
-/// Substring-scan node tokens for `forloop` or `ifchanged`. False
-/// positives are safe (extra work); false negatives would break
-/// `forloop.counter` or `{% ifchanged %}` state scoping. Used only
-/// at parse time.
 fn nodelist_references_forloop(nodelist: &NodeList) -> bool {
     fn token_needs_forloop(node: &dyn Node) -> bool {
-        node.token()
-            .map(|t| t.contents.contains("forloop") || t.contents.starts_with("ifchanged"))
-            .unwrap_or(false)
+        let any = node.as_any();
+        any.is::<crate::django_drop_in::PyOpaqueNode>()
+            || any.is::<crate::tags::loader_tags::IncludeNode>()
+            || node
+                .token()
+                .map(|t| t.contents.contains("forloop") || t.contents.starts_with("ifchanged"))
+                .unwrap_or(false)
     }
 
     fn walk(nodelist: &NodeList) -> bool {
-        // NodeList::iter() skips Text entries (no template syntax).
         for node in nodelist.iter() {
             if token_needs_forloop(node) {
                 return true;

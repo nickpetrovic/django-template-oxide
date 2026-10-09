@@ -92,16 +92,13 @@ def _patch_template_render():
 
         flat = context.flatten()
 
-        request = getattr(context, "request", None)
-        if request is not None and "request" not in flat:
-            flat["request"] = request
-
         oxide_ctx = OxideContext(
             flat,
             autoescape=context.autoescape,
             use_l10n=getattr(context, "use_l10n", None),
             use_tz=getattr(context, "use_tz", None),
             string_if_invalid=string_if_invalid or None,
+            request=getattr(context, "request", None),
         )
 
         # Attach render_context.template so Django's render_annotated can

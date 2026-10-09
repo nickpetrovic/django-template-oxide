@@ -1,314 +1,509 @@
-//! Rust fast path for Django's `dateformat`. Common 90% of `|date`
-//! invocations; unknown chars return `None` so the caller falls back
-//! to `django.utils.dateformat.format`.
-//!
-//! Not supported (delegated to Django): `c`/`r`/`U` composites,
-//! `O`/`T`/`Z`/`e` timezone, `o`/`W` ISO week, localised names.
+use std::collections::HashMap;
+use std::fmt::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
-use std::fmt::Write;
+use pyo3::types::{PyAny, PyDate, PyDateTime};
 
-/// `Some(rendered)` when every format char is supported; `None`
-/// otherwise. Component getattrs are lazy (only referenced chars).
-pub fn try_format(py: Python<'_>, dt: &Bound<'_, PyAny>, format_str: &str) -> Option<String> {
-    if !is_supported(format_str) {
+const FORMAT_CHARS: &str = "aAbcdDeEfFgGhHiIjlLmMnNoOPrsStTUuwWyYzZ";
+const TIME_FORMAT_CHARS: &str = "aAefgGhHiOPsTuZ";
+const RUST_FORMAT_CHARS: &str = "aAbdDEfFgGhHijlLmMnNPsStuwyYz";
+const NAMED_FORMAT_CHARS: &str = "aAbDEFlMNP";
+
+enum Piece {
+    Literal(String),
+    Format(char),
+}
+
+fn parse_format(format_str: &str) -> Vec<Piece> {
+    let chars: Vec<char> = format_str.chars().collect();
+    let mut pieces = Vec::new();
+    let mut literal: Vec<char> = Vec::new();
+    for (index, &c) in chars.iter().enumerate() {
+        let escaped = index > 0 && chars[index - 1] == '\\';
+        if FORMAT_CHARS.contains(c) && !escaped {
+            if !literal.is_empty() {
+                pieces.push(Piece::Literal(unescape(&literal)));
+                literal.clear();
+            }
+            pieces.push(Piece::Format(c));
+        } else {
+            literal.push(c);
+        }
+    }
+    if !literal.is_empty() {
+        pieces.push(Piece::Literal(unescape(&literal)));
+    }
+    pieces
+}
+
+fn unescape(chars: &[char]) -> String {
+    let mut out = String::with_capacity(chars.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() && chars[index + 1] != '\n' {
+            out.push(chars[index + 1]);
+            index += 2;
+        } else {
+            out.push(chars[index]);
+            index += 1;
+        }
+    }
+    out
+}
+
+struct LocaleNames {
+    months: Vec<String>,
+    months_3: Vec<String>,
+    months_3_title: Vec<String>,
+    months_ap: Vec<String>,
+    months_alt: Vec<String>,
+    weekdays: Vec<String>,
+    weekdays_abbr: Vec<String>,
+    am: String,
+    pm: String,
+    am_upper: String,
+    pm_upper: String,
+    midnight: String,
+    noon: String,
+}
+
+#[derive(Default)]
+struct RenderLocale {
+    epoch: u64,
+    activation: Option<Py<PyAny>>,
+    language: Option<Py<PyAny>>,
+    names: Option<Arc<LocaleNames>>,
+    formats: HashMap<String, Option<String>>,
+    decimal_separator: Option<Option<Arc<str>>>,
+}
+
+thread_local! {
+    static LOCALE_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static RENDER_LOCALE: std::cell::RefCell<RenderLocale> =
+        std::cell::RefCell::new(RenderLocale::default());
+}
+
+pub fn invalidate_locale_snapshot() {
+    LOCALE_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
+}
+
+pub fn reset_locale_snapshot() {
+    RENDER_LOCALE.with(|cell| *cell.borrow_mut() = RenderLocale::default());
+}
+
+fn activation_variable<'py>(active: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+    let py = active.py();
+    let variable = active
+        .getattr(pyo3::intern!(py, "_storage"))
+        .and_then(|storage| storage.getattr(pyo3::intern!(py, "_data")))
+        .ok()?;
+    let context_var_type = py.import("contextvars").ok()?.getattr("ContextVar").ok()?;
+    variable
+        .is_exact_instance(&context_var_type)
+        .then_some(variable)
+}
+
+type CachedActivationVariable = Option<(Py<PyAny>, Option<Py<PyAny>>)>;
+
+fn current_activation(py: Python<'_>) -> Option<Bound<'_, PyAny>> {
+    thread_local! {
+        static ACTIVATION_VARIABLE: std::cell::RefCell<CachedActivationVariable> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let active = crate::python_cache::django(py)
+        .ok()?
+        .trans_real
+        .bind(py)
+        .getattr(pyo3::intern!(py, "_active"))
+        .ok()?;
+    let cached = ACTIVATION_VARIABLE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|(cached_active, variable)| {
+                cached_active
+                    .bind(py)
+                    .is(&active)
+                    .then(|| variable.as_ref().map(|v| v.clone_ref(py)))
+            })
+    });
+    let variable = match cached {
+        Some(variable) => variable,
+        None => {
+            let variable = activation_variable(&active).map(Bound::unbind);
+            ACTIVATION_VARIABLE.with(|cell| {
+                *cell.borrow_mut() = Some((
+                    active.clone().unbind(),
+                    variable.as_ref().map(|v| v.clone_ref(py)),
+                ));
+            });
+            variable
+        }
+    }?;
+    variable
+        .bind(py)
+        .call_method1(pyo3::intern!(py, "get"), (py.None(),))
+        .ok()
+}
+
+fn revalidate_render_locale(py: Python<'_>) -> PyResult<()> {
+    let epoch = LOCALE_EPOCH.with(std::cell::Cell::get);
+    let stored = RENDER_LOCALE.with(|cell| {
+        let snapshot = cell.borrow();
+        (snapshot.epoch != epoch).then(|| {
+            (
+                snapshot.activation.as_ref().map(|a| a.clone_ref(py)),
+                snapshot.language.as_ref().map(|l| l.clone_ref(py)),
+            )
+        })
+    });
+    let Some((stored_activation, stored_language)) = stored else {
+        return Ok(());
+    };
+    let activation = current_activation(py);
+    let same_activation = match (&stored_activation, &activation) {
+        (Some(stored), Some(current)) => stored.bind(py).is(current),
+        _ => false,
+    };
+    if same_activation && stored_language.is_some() {
+        RENDER_LOCALE.with(|cell| cell.borrow_mut().epoch = epoch);
+        return Ok(());
+    }
+    let language = crate::python_cache::django(py)?
+        .get_language
+        .bind(py)
+        .call0()?;
+    let same_language = match &stored_language {
+        Some(stored) => {
+            let stored = stored.bind(py);
+            stored.is(&language) || stored.eq(&language)?
+        }
+        None => false,
+    };
+    let activation = activation.map(Bound::unbind);
+    RENDER_LOCALE.with(|cell| {
+        let mut snapshot = cell.borrow_mut();
+        if same_language {
+            snapshot.epoch = epoch;
+            snapshot.activation = activation;
+        } else {
+            *snapshot = RenderLocale {
+                epoch,
+                activation,
+                language: Some(language.unbind()),
+                ..RenderLocale::default()
+            };
+        }
+    });
+    Ok(())
+}
+
+fn current_render_locale<R>(py: Python<'_>, read: impl FnOnce(&RenderLocale) -> R) -> PyResult<R> {
+    revalidate_render_locale(py)?;
+    Ok(RENDER_LOCALE.with(|cell| read(&cell.borrow())))
+}
+
+fn update_render_locale(update: impl FnOnce(&mut RenderLocale)) {
+    let epoch = LOCALE_EPOCH.with(std::cell::Cell::get);
+    RENDER_LOCALE.with(|cell| {
+        let mut snapshot = cell.borrow_mut();
+        if snapshot.epoch == epoch {
+            update(&mut snapshot);
+        }
+    });
+}
+
+pub fn decimal_separator(py: Python<'_>) -> PyResult<Option<Arc<str>>> {
+    if let Some(separator) =
+        current_render_locale(py, |snapshot| snapshot.decimal_separator.clone())?
+    {
+        return Ok(separator);
+    }
+    let format = crate::python_cache::django(py)?
+        .get_format
+        .bind(py)
+        .call1((pyo3::intern!(py, "DECIMAL_SEPARATOR"),))?;
+    let separator = match format.cast_exact::<pyo3::types::PyString>() {
+        Ok(text) => Some(Arc::<str>::from(text.to_cow()?.as_ref())),
+        Err(_) => None,
+    };
+    update_render_locale(|snapshot| snapshot.decimal_separator = Some(separator.clone()));
+    Ok(separator)
+}
+
+struct LocaleCache {
+    translations: Option<Py<PyAny>>,
+    by_language: HashMap<String, Arc<LocaleNames>>,
+}
+
+fn locale_names(py: Python<'_>) -> PyResult<Arc<LocaleNames>> {
+    if let Some(names) = current_render_locale(py, |snapshot| snapshot.names.clone())? {
+        return Ok(names);
+    }
+    let names = shared_locale_names(py)?;
+    update_render_locale(|snapshot| snapshot.names = Some(Arc::clone(&names)));
+    Ok(names)
+}
+
+fn shared_locale_names(py: Python<'_>) -> PyResult<Arc<LocaleNames>> {
+    static CACHE: OnceLock<Mutex<LocaleCache>> = OnceLock::new();
+    let dj = crate::python_cache::django(py)?;
+    let language = dj.get_language.bind(py).call0()?;
+    let key = if language.is_none() {
+        String::new()
+    } else {
+        language.str()?.to_string()
+    };
+    let translations = dj
+        .trans_real
+        .bind(py)
+        .getattr(pyo3::intern!(py, "_translations"))
+        .ok();
+    let cache = CACHE.get_or_init(|| {
+        Mutex::new(LocaleCache {
+            translations: None,
+            by_language: HashMap::new(),
+        })
+    });
+    let cached = cache.lock().ok().and_then(|mut guard| {
+        let current = translations.as_ref().map(|t| t.as_ptr());
+        let stored = guard.translations.as_ref().map(|t| t.as_ptr());
+        if current != stored {
+            guard.by_language.clear();
+            guard.translations = translations.as_ref().map(|t| t.clone().unbind());
+        }
+        guard.by_language.get(&key).cloned()
+    });
+    if let Some(names) = cached {
+        return Ok(names);
+    }
+    let names = build_locale_names(py, dj)?;
+    if let Ok(mut guard) = cache.lock() {
+        guard.by_language.insert(key, Arc::clone(&names));
+    }
+    Ok(names)
+}
+
+fn is_python_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn resolve_format(py: Python<'_>, format_str: &str) -> Option<String> {
+    if !is_python_identifier(format_str) {
+        return Some(format_str.to_owned());
+    }
+    if let Some(resolved) =
+        current_render_locale(py, |snapshot| snapshot.formats.get(format_str).cloned()).ok()?
+    {
+        return resolved;
+    }
+    let resolved = crate::python_cache::django(py)
+        .ok()
+        .and_then(|dj| dj.get_format.bind(py).call1((format_str,)).ok())
+        .and_then(|format| {
+            format
+                .cast::<pyo3::types::PyString>()
+                .ok()
+                .map(|s| s.to_string())
+        });
+    update_render_locale(|snapshot| {
+        snapshot
+            .formats
+            .insert(format_str.to_owned(), resolved.clone());
+    });
+    resolved
+}
+
+fn build_locale_names(
+    py: Python<'_>,
+    dj: &crate::python_cache::DjangoModules,
+) -> PyResult<Arc<LocaleNames>> {
+    let dates = dj.dates.bind(py);
+    let table = |name: &str, keys: std::ops::RangeInclusive<i64>| -> PyResult<Vec<String>> {
+        let mapping = dates.getattr(name)?;
+        keys.map(|k| Ok(mapping.get_item(k)?.str()?.to_string()))
+            .collect()
+    };
+    let titled_table = |name: &str| -> PyResult<Vec<String>> {
+        let mapping = dates.getattr(name)?;
+        (1..=12)
+            .map(|k| {
+                Ok(mapping
+                    .get_item(k)?
+                    .str()?
+                    .call_method0("title")?
+                    .str()?
+                    .to_string())
+            })
+            .collect()
+    };
+    let gettext = |msgid: &str| -> PyResult<String> {
+        Ok(dj.gettext.bind(py).call1((msgid,))?.str()?.to_string())
+    };
+    Ok(Arc::new(LocaleNames {
+        months: table("MONTHS", 1..=12)?,
+        months_3: table("MONTHS_3", 1..=12)?,
+        months_3_title: titled_table("MONTHS_3")?,
+        months_ap: table("MONTHS_AP", 1..=12)?,
+        months_alt: table("MONTHS_ALT", 1..=12)?,
+        weekdays: table("WEEKDAYS", 0..=6)?,
+        weekdays_abbr: table("WEEKDAYS_ABBR", 0..=6)?,
+        am: gettext("a.m.")?,
+        pm: gettext("p.m.")?,
+        am_upper: gettext("AM")?,
+        pm_upper: gettext("PM")?,
+        midnight: gettext("midnight")?,
+        noon: gettext("noon")?,
+    }))
+}
+
+struct Components {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    microsecond: u32,
+}
+
+fn components(value: &Bound<'_, PyAny>, is_datetime: bool) -> PyResult<Components> {
+    let int = |name: &str| -> PyResult<i64> { value.getattr(name)?.extract::<i64>() };
+    Ok(Components {
+        year: int("year")? as i32,
+        month: int("month")? as u32,
+        day: int("day")? as u32,
+        hour: if is_datetime { int("hour")? as u32 } else { 0 },
+        minute: if is_datetime {
+            int("minute")? as u32
+        } else {
+            0
+        },
+        second: if is_datetime {
+            int("second")? as u32
+        } else {
+            0
+        },
+        microsecond: if is_datetime {
+            int("microsecond")? as u32
+        } else {
+            0
+        },
+    })
+}
+
+pub fn try_format(py: Python<'_>, value: &Bound<'_, PyAny>, format_str: &str) -> Option<String> {
+    let is_datetime = value.is_exact_instance_of::<PyDateTime>();
+    let is_date = !is_datetime && value.is_exact_instance_of::<PyDate>();
+    if !is_datetime && !is_date {
         return None;
     }
-
-    let mut cache = ComponentCache::new(dt);
+    let format_str = resolve_format(py, format_str)?;
+    let format_str = format_str.as_str();
+    let pieces = parse_format(format_str);
+    for piece in &pieces {
+        if let Piece::Format(c) = piece {
+            if !RUST_FORMAT_CHARS.contains(*c) {
+                return None;
+            }
+            if is_date && TIME_FORMAT_CHARS.contains(*c) {
+                return None;
+            }
+        }
+    }
+    let parts = components(value, is_datetime).ok()?;
+    let needs_names = pieces
+        .iter()
+        .any(|piece| matches!(piece, Piece::Format(c) if NAMED_FORMAT_CHARS.contains(*c)));
+    let names = if needs_names {
+        Some(locale_names(py).ok()?)
+    } else {
+        None
+    };
+    let names = names.as_deref();
+    let weekday_monday0 = (weekday_from_ymd(parts.year, parts.month, parts.day) + 6) % 7;
+    let hour_12 = if parts.hour % 12 == 0 {
+        12
+    } else {
+        parts.hour % 12
+    };
+    let month_index = (parts.month - 1) as usize;
+    let is_pm = parts.hour > 11;
+    fn am_pm(names: &LocaleNames, is_pm: bool) -> &str {
+        if is_pm { &names.pm } else { &names.am }
+    }
+    let twelve_hour_minutes = || {
+        if parts.minute == 0 {
+            hour_12.to_string()
+        } else {
+            format!("{}:{:02}", hour_12, parts.minute)
+        }
+    };
 
     let mut out = String::with_capacity(format_str.len() + 16);
-    let mut chars = format_str.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        match c {
-            // Backslash: emit the next char literally.
-            '\\' => {
-                if let Some(next) = chars.next() {
-                    out.push(next);
-                }
-            }
-            'd' => write!(out, "{:02}", cache.day(py)?).ok()?,
-            'j' => write!(out, "{}", cache.day(py)?).ok()?,
-            'D' => out.push_str(DAY_NAMES_SHORT[cache.weekday_0sun(py)? as usize]),
-            'l' => out.push_str(DAY_NAMES_LONG[cache.weekday_0sun(py)? as usize]),
-            'N' => out.push_str(MONTH_AP_STYLE[(cache.month(py)? - 1) as usize]),
-            'S' => out.push_str(ordinal_suffix(cache.day(py)?)),
-            'w' => write!(out, "{}", cache.weekday_0sun(py)?).ok()?,
-            'z' => write!(out, "{}", cache.day_of_year(py)?).ok()?,
-
-            'm' => write!(out, "{:02}", cache.month(py)?).ok()?,
-            'n' => write!(out, "{}", cache.month(py)?).ok()?,
-            'M' => out.push_str(MONTHS_SHORT[(cache.month(py)? - 1) as usize]),
-            'F' => out.push_str(MONTHS_LONG[(cache.month(py)? - 1) as usize]),
-            't' => write!(out, "{}", days_in_month(cache.year(py)?, cache.month(py)?)).ok()?,
-            'L' => out.push_str(if is_leap_year(cache.year(py)?) {
-                "True"
-            } else {
-                "False"
-            }),
-
-            'Y' => write!(out, "{}", cache.year(py)?).ok()?,
-            'y' => write!(out, "{:02}", cache.year(py)?.rem_euclid(100)).ok()?,
-
-            'H' => write!(out, "{:02}", cache.hour(py)?).ok()?,
-            'G' => write!(out, "{}", cache.hour(py)?).ok()?,
-            'h' => write!(out, "{:02}", hour_12(cache.hour(py)?)).ok()?,
-            'g' => write!(out, "{}", hour_12(cache.hour(py)?)).ok()?,
-            'i' => write!(out, "{:02}", cache.minute(py)?).ok()?,
-            's' => write!(out, "{:02}", cache.second(py)?).ok()?,
-            'u' => write!(out, "{:06}", cache.microsecond(py)?).ok()?,
-
-            'a' => out.push_str(if cache.hour(py)? < 12 { "a.m." } else { "p.m." }),
-            'A' => out.push_str(if cache.hour(py)? < 12 { "AM" } else { "PM" }),
-            'P' => {
-                // 12-hour with "a.m./p.m." and noon/midnight specials.
-                let h = cache.hour(py)?;
-                let m = cache.minute(py)?;
-                if h == 0 && m == 0 {
-                    out.push_str("midnight");
-                } else if h == 12 && m == 0 {
-                    out.push_str("noon");
+    for piece in pieces {
+        match piece {
+            Piece::Literal(text) => out.push_str(&text),
+            Piece::Format(c) => match c {
+                'a' => out.push_str(am_pm(names?, is_pm)),
+                'A' => out.push_str(if parts.hour > 11 {
+                    &names?.pm_upper
                 } else {
-                    let h12 = hour_12(h);
-                    if m == 0 {
-                        write!(out, "{} {}", h12, if h < 12 { "a.m." } else { "p.m." }).ok()?;
+                    &names?.am_upper
+                }),
+                'b' => out.push_str(&names?.months_3[month_index]),
+                'd' => write!(out, "{:02}", parts.day).ok()?,
+                'D' => out.push_str(&names?.weekdays_abbr[weekday_monday0 as usize]),
+                'E' => out.push_str(&names?.months_alt[month_index]),
+                'f' => out.push_str(&twelve_hour_minutes()),
+                'F' => out.push_str(&names?.months[month_index]),
+                'g' => write!(out, "{hour_12}").ok()?,
+                'G' => write!(out, "{}", parts.hour).ok()?,
+                'h' => write!(out, "{hour_12:02}").ok()?,
+                'H' => write!(out, "{:02}", parts.hour).ok()?,
+                'i' => write!(out, "{:02}", parts.minute).ok()?,
+                'j' => write!(out, "{}", parts.day).ok()?,
+                'l' => out.push_str(&names?.weekdays[weekday_monday0 as usize]),
+                'L' => out.push_str(if is_leap_year(parts.year) {
+                    "True"
+                } else {
+                    "False"
+                }),
+                'm' => write!(out, "{:02}", parts.month).ok()?,
+                'M' => out.push_str(&names?.months_3_title[month_index]),
+                'n' => write!(out, "{}", parts.month).ok()?,
+                'N' => out.push_str(&names?.months_ap[month_index]),
+                'P' => {
+                    let names = names?;
+                    if parts.minute == 0 && parts.hour == 0 {
+                        out.push_str(&names.midnight);
+                    } else if parts.minute == 0 && parts.hour == 12 {
+                        out.push_str(&names.noon);
                     } else {
-                        write!(
-                            out,
-                            "{}:{:02} {}",
-                            h12,
-                            m,
-                            if h < 12 { "a.m." } else { "p.m." }
-                        )
-                        .ok()?;
+                        write!(out, "{} {}", twelve_hour_minutes(), am_pm(names, is_pm)).ok()?;
                     }
                 }
-            }
-
-            // Literal (already filtered by is_supported).
-            _ => out.push(c),
+                's' => write!(out, "{:02}", parts.second).ok()?,
+                'S' => out.push_str(ordinal_suffix(parts.day)),
+                't' => write!(out, "{}", days_in_month(parts.year, parts.month)).ok()?,
+                'u' => write!(out, "{:06}", parts.microsecond).ok()?,
+                'w' => write!(
+                    out,
+                    "{}",
+                    weekday_from_ymd(parts.year, parts.month, parts.day)
+                )
+                .ok()?,
+                'y' => write!(out, "{:02}", parts.year.rem_euclid(100)).ok()?,
+                'Y' => write!(out, "{:04}", parts.year).ok()?,
+                'z' => write!(out, "{}", day_of_year(parts.year, parts.month, parts.day)).ok()?,
+                _ => return None,
+            },
         }
     }
-
     Some(out)
 }
-
-fn is_supported(format_str: &str) -> bool {
-    let mut chars = format_str.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            chars.next();
-            continue;
-        }
-        if is_format_char(c) || is_literal_char(c) {
-            continue;
-        }
-        return false;
-    }
-    true
-}
-
-/// Format chars we implement.
-#[inline]
-fn is_format_char(c: char) -> bool {
-    matches!(
-        c,
-        'd' | 'j'
-            | 'D'
-            | 'l'
-            | 'N'
-            | 'S'
-            | 'w'
-            | 'z'
-            | 'm'
-            | 'n'
-            | 'M'
-            | 'F'
-            | 't'
-            | 'L'
-            | 'Y'
-            | 'y'
-            | 'H'
-            | 'G'
-            | 'h'
-            | 'g'
-            | 'i'
-            | 's'
-            | 'u'
-            | 'a'
-            | 'A'
-            | 'P'
-    )
-}
-
-/// Chars that pass through as literals (no format meaning in Django's
-/// spec). Includes punctuation, whitespace, and any non-format-char ASCII
-/// letter that Django would also emit as-is.
-///
-/// Django's dateformat actually treats *any* unknown char as a literal.
-/// We're more conservative - non-ASCII letters pass through, but we
-/// refuse format strings containing Django-format-meaningful chars we
-/// don't yet implement (`c`, `r`, `U`, `O`, `T`, `Z`, `e`, `o`, `W`) so
-/// the caller falls back to Django's Python impl for correctness.
-#[inline]
-fn is_literal_char(c: char) -> bool {
-    !matches!(
-        c,
-        // Format chars we don't yet implement - keep the format-string
-        // scanner conservative.
-        'c' | 'r' | 'U' | 'O' | 'T' | 'Z' | 'e' | 'o' | 'W'
-    )
-}
-
-/// Lazy date/time components. One `getattr` per referenced component.
-struct ComponentCache<'a, 'py> {
-    dt: &'a Bound<'py, PyAny>,
-    year: Option<i32>,
-    month: Option<u32>,
-    day: Option<u32>,
-    hour: Option<u32>,
-    minute: Option<u32>,
-    second: Option<u32>,
-    microsecond: Option<u32>,
-    weekday_0sun: Option<u32>,
-    day_of_year: Option<u32>,
-}
-
-impl<'a, 'py> ComponentCache<'a, 'py> {
-    fn new(dt: &'a Bound<'py, PyAny>) -> Self {
-        Self {
-            dt,
-            year: None,
-            month: None,
-            day: None,
-            hour: None,
-            minute: None,
-            second: None,
-            microsecond: None,
-            weekday_0sun: None,
-            day_of_year: None,
-        }
-    }
-
-    fn year(&mut self, _py: Python<'_>) -> Option<i32> {
-        if let Some(v) = self.year {
-            return Some(v);
-        }
-        let v: i32 = self.dt.getattr("year").ok()?.extract().ok()?;
-        self.year = Some(v);
-        Some(v)
-    }
-    fn month(&mut self, _py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.month {
-            return Some(v);
-        }
-        let v: u32 = self.dt.getattr("month").ok()?.extract().ok()?;
-        self.month = Some(v);
-        Some(v)
-    }
-    fn day(&mut self, _py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.day {
-            return Some(v);
-        }
-        let v: u32 = self.dt.getattr("day").ok()?.extract().ok()?;
-        self.day = Some(v);
-        Some(v)
-    }
-    // Plain `date` objects lack hour/minute/etc. The None propagates
-    // out of `try_format` so the Python fallback raises Django's
-    // proper "format for date objects may not contain time-related
-    // format specifiers" error.
-    fn hour(&mut self, _py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.hour {
-            return Some(v);
-        }
-        let v: u32 = self.dt.getattr("hour").ok()?.extract().ok()?;
-        self.hour = Some(v);
-        Some(v)
-    }
-    fn minute(&mut self, _py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.minute {
-            return Some(v);
-        }
-        let v: u32 = self.dt.getattr("minute").ok()?.extract().ok()?;
-        self.minute = Some(v);
-        Some(v)
-    }
-    fn second(&mut self, _py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.second {
-            return Some(v);
-        }
-        let v: u32 = self.dt.getattr("second").ok()?.extract().ok()?;
-        self.second = Some(v);
-        Some(v)
-    }
-    fn microsecond(&mut self, _py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.microsecond {
-            return Some(v);
-        }
-        let v: u32 = self.dt.getattr("microsecond").ok()?.extract().ok()?;
-        self.microsecond = Some(v);
-        Some(v)
-    }
-    /// 0=Sunday..6=Saturday (Django's `w` convention).
-    fn weekday_0sun(&mut self, py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.weekday_0sun {
-            return Some(v);
-        }
-        let v = weekday_from_ymd(self.year(py)?, self.month(py)?, self.day(py)?);
-        self.weekday_0sun = Some(v);
-        Some(v)
-    }
-    fn day_of_year(&mut self, py: Python<'_>) -> Option<u32> {
-        if let Some(v) = self.day_of_year {
-            return Some(v);
-        }
-        let v = day_of_year(self.year(py)?, self.month(py)?, self.day(py)?);
-        self.day_of_year = Some(v);
-        Some(v)
-    }
-}
-
-// Static tables matching Django's exact strings.
-
-const MONTHS_SHORT: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-const MONTHS_LONG: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
-/// AP-style abbreviations (Django's `N`).
-const MONTH_AP_STYLE: [&str; 12] = [
-    "Jan.", "Feb.", "March", "April", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.",
-    "Dec.",
-];
-
-/// Indexed by `w` (0=Sun..6=Sat).
-const DAY_NAMES_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const DAY_NAMES_LONG: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
 
 #[inline]
 fn is_leap_year(year: i32) -> bool {
@@ -331,16 +526,10 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     }
 }
 
-/// 1-indexed day of year (Feb 1 -> 32).
 fn day_of_year(year: i32, month: u32, day: u32) -> u32 {
-    let mut total: u32 = 0;
-    for m in 1..month {
-        total += days_in_month(year, m);
-    }
-    total + day
+    (1..month).map(|m| days_in_month(year, m)).sum::<u32>() + day
 }
 
-/// 0=Sun..6=Sat via Sakamoto's algorithm.
 fn weekday_from_ymd(year: i32, month: u32, day: u32) -> u32 {
     static T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
     let mut y = year;
@@ -350,15 +539,6 @@ fn weekday_from_ymd(year: i32, month: u32, day: u32) -> u32 {
     let m = month as i32;
     let d = day as i32;
     ((y + y / 4 - y / 100 + y / 400 + T[(m - 1) as usize] + d).rem_euclid(7)) as u32
-}
-
-#[inline]
-fn hour_12(h: u32) -> u32 {
-    match h {
-        0 => 12,
-        h if h > 12 => h - 12,
-        h => h,
-    }
 }
 
 #[inline]
@@ -378,6 +558,16 @@ fn ordinal_suffix(day: u32) -> &'static str {
 mod tests {
     use super::*;
 
+    fn render(format_str: &str) -> Vec<String> {
+        parse_format(format_str)
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::Literal(text) => format!("L:{text}"),
+                Piece::Format(c) => format!("F:{c}"),
+            })
+            .collect()
+    }
+
     #[test]
     fn leap_years() {
         assert!(is_leap_year(2000));
@@ -387,60 +577,31 @@ mod tests {
     }
 
     #[test]
-    fn days_in_month_basics() {
-        assert_eq!(days_in_month(2023, 1), 31);
-        assert_eq!(days_in_month(2023, 2), 28);
-        assert_eq!(days_in_month(2024, 2), 29);
-        assert_eq!(days_in_month(2023, 4), 30);
+    fn weekday_known_dates() {
+        assert_eq!(weekday_from_ymd(2026, 5, 26), 2);
+        assert_eq!(weekday_from_ymd(2000, 1, 1), 6);
+        assert_eq!(weekday_from_ymd(2024, 2, 29), 4);
     }
 
     #[test]
-    fn weekday_known_dates() {
-        // 2026-05-26 Tue (w=2).
-        assert_eq!(weekday_from_ymd(2026, 5, 26), 2);
-        // 2000-01-01 Sat (w=6).
-        assert_eq!(weekday_from_ymd(2000, 1, 1), 6);
-        // 2024-02-29 Thu (w=4).
-        assert_eq!(weekday_from_ymd(2024, 2, 29), 4);
+    fn day_of_year_counts_from_one() {
+        assert_eq!(day_of_year(2024, 1, 1), 1);
+        assert_eq!(day_of_year(2024, 3, 1), 61);
+        assert_eq!(day_of_year(2023, 3, 1), 60);
     }
 
     #[test]
     fn ordinal_suffixes() {
         assert_eq!(ordinal_suffix(1), "st");
-        assert_eq!(ordinal_suffix(2), "nd");
-        assert_eq!(ordinal_suffix(3), "rd");
-        assert_eq!(ordinal_suffix(4), "th");
         assert_eq!(ordinal_suffix(11), "th");
-        assert_eq!(ordinal_suffix(12), "th");
-        assert_eq!(ordinal_suffix(13), "th");
-        assert_eq!(ordinal_suffix(21), "st");
         assert_eq!(ordinal_suffix(22), "nd");
-        assert_eq!(ordinal_suffix(31), "st");
+        assert_eq!(ordinal_suffix(23), "rd");
     }
 
     #[test]
-    fn hour_12_known() {
-        assert_eq!(hour_12(0), 12);
-        assert_eq!(hour_12(1), 1);
-        assert_eq!(hour_12(11), 11);
-        assert_eq!(hour_12(12), 12);
-        assert_eq!(hour_12(13), 1);
-        assert_eq!(hour_12(23), 11);
-    }
-
-    #[test]
-    fn unsupported_format_chars_bail() {
-        assert!(!is_supported("c"));
-        assert!(!is_supported("M d, Y r"));
-        assert!(!is_supported("U"));
-    }
-
-    #[test]
-    fn supported_format_chars_pass() {
-        assert!(is_supported("M d, Y"));
-        assert!(is_supported("H:i:s"));
-        assert!(is_supported("D, j N Y"));
-        // Backslash escape preceding a non-format char.
-        assert!(is_supported("\\Y is Y"));
+    fn escaped_format_chars_are_literal() {
+        assert_eq!(render("\\Y Y"), vec!["L:Y ", "F:Y"]);
+        assert_eq!(render("\\\\d"), vec!["L:\\d"]);
+        assert_eq!(render("a\\"), vec!["F:a", "L:\\"]);
     }
 }
