@@ -18,7 +18,7 @@ engine.
 | Python, free-threaded  | CPython 3.14.7 (3.14t), GIL off                  |
 | Django                 | 6.1.2                                            |
 | Rust                   | 1.96.1                                           |
-| django-template-oxide  | 0.1.0, commit `f827062`                          |
+| django-template-oxide  | 0.1.0, commit `ca15b1b`                          |
 | django-rusty-templates | 0.1.0, commit `5adbe61`                          |
 
 Run on October 9, 2026, with the default settings: 50 rows of data,
@@ -34,8 +34,8 @@ its thread and memory results are shown separately.
 
 | Comparison            | Regular build | Free-threaded build | Workloads compared | Oxide slower on |
 |-----------------------|--------------:|--------------------:|-------------------:|-----------------|
-| Oxide vs rusty        | 3.2× faster   | 3.1× faster         | 32 of 50           | none            |
-| Oxide vs stock Django | 6.2× faster   | 6.1× faster         | 50 of 50           | none            |
+| Oxide vs rusty        | 3.4× faster   | 3.3× faster         | 32 of 50           | none            |
+| Oxide vs stock Django | 6.4× faster   | 6.4× faster         | 50 of 50           | none            |
 
 The speedup is the geometric mean over the workloads both engines can
 run. Rusty could not run 18 of the 50 workloads; the tables show why
@@ -48,36 +48,36 @@ objects.
 
 | Workload                                       | Oxide    | Rusty         | Stock Django | vs rusty | vs stock |
 |------------------------------------------------|---------:|--------------:|-------------:|---------:|---------:|
-| Text only, no variables                        | 2.03 µs  | 2.87 µs       | 9.61 µs      | 1.4×     | 4.7×     |
-| Three attribute lookups                        | 8.99 µs  | 63.7 µs       | 161.8 µs     | 7.1×     | 18×      |
-| Full table (mixed tags and filters)            | 41.4 µs  | 359.6 µs      | 760.1 µs     | 8.7×     | 18×      |
-| Deep lookup (six levels)                       | 11.9 µs  | 39.6 µs       | 87.4 µs      | 3.3×     | 7.3×     |
-| Dictionary lookups                             | 14.4 µs  | 49.0 µs       | 143.9 µs     | 3.4×     | 10×      |
-| List indexing                                  | 5.58 µs  | 25.7 µs       | 191.2 µs     | 4.6×     | 34×      |
-| Filter chain (six filters)                     | 15.7 µs  | syntax error  | 332.7 µs     |          | 21×      |
-| Date filters                                   | 52.0 µs  | 450.5 µs      | 712.9 µs     | 8.7×     | 14×      |
-| `if` / `elif` chain                            | 14.7 µs  | 26.3 µs       | 75.2 µs      | 1.8×     | 5.1×     |
-| Nested `{% with %}`                            | 58.6 µs  | not supported | 406.2 µs     |          | 6.9×     |
-| `forloop` variables                            | 14.4 µs  | 29.0 µs       | 192.9 µs     | 2.0×     | 13×      |
-| `{% cycle %}`                                  | 10.4 µs  | 29.2 µs       | 82.8 µs      | 2.8×     | 7.9×     |
-| Autoescaping HTML                              | 7.15 µs  | 21.8 µs       | 60.5 µs      | 3.0×     | 8.5×     |
-| Nested loops                                   | 34.8 µs  | 44.5 µs       | 365.9 µs     | 1.3×     | 11×      |
-| Boolean `{% if %}` (and, or, not, in)          | 12.2 µs  | 26.9 µs       | 60.3 µs      | 2.2×     | 4.9×     |
-| `{% translate %}` per row                      | 68.1 µs  | not supported | 186.9 µs     |          | 2.7×     |
-| Long text autoescaping                         | 22.0 µs  | 39.2 µs       | 81.1 µs      | 1.8×     | 3.7×     |
-| Text filters (truncatewords, linebreaksbr)     | 50.8 µs  | syntax error  | 281.7 µs     |          | 5.5×     |
-| `{% url %}` per row                            | 212.9 µs | 246.3 µs      | 354.4 µs     | 1.2×     | 1.7×     |
-| `{% csrf_token %}` per row                     | 2.58 µs  | 9.88 µs       | 22.4 µs      | 3.8×     | 8.7×     |
-| Empty loop (`{% empty %}`)                     | 362 ns   | 484 ns        | 2.42 µs      | 1.3×     | 6.7×     |
-| `{% spaceless %}`                              | 11.7 µs  | not supported | 102.8 µs     |          | 8.8×     |
-| Custom Python filter                           | 10.0 µs  | not supported | 64.6 µs      |          | 6.5×     |
-| Custom `simple_tag`                            | 47.2 µs  | not supported | 63.0 µs      |          | 1.3×     |
-| Custom `@register.tag`                         | 18.2 µs  | not supported | 33.4 µs      |          | 1.8×     |
-| `{% regroup %}`                                | 44.5 µs  | not supported | 279.2 µs     |          | 6.3×     |
-| Filter with a variable argument                | 8.54 µs  | 23.5 µs       | 87.6 µs      | 2.8×     | 10×      |
-| `{% include %}` per row                        | 24.1 µs  | 44.4 µs       | 222.0 µs     | 1.8×     | 9.2×     |
-| `{% extends %}` with three blocks              | 10.5 µs  | not supported | 120.9 µs     |          | 11×      |
-| Three-level `{% extends %}` with `block.super` | 11.8 µs  | not supported | 127.2 µs     |          | 11×      |
+| Text only, no variables                        | 2.17 µs  | 2.93 µs       | 9.62 µs      | 1.3×     | 4.4×     |
+| Three attribute lookups                        | 8.95 µs  | 65.4 µs       | 159.8 µs     | 7.3×     | 18×      |
+| Full table (mixed tags and filters)            | 35.4 µs  | 368.2 µs      | 758.1 µs     | 10×      | 21×      |
+| Deep lookup (six levels)                       | 11.8 µs  | 41.0 µs       | 87.0 µs      | 3.5×     | 7.4×     |
+| Dictionary lookups                             | 14.2 µs  | 52.0 µs       | 143.7 µs     | 3.7×     | 10×      |
+| List indexing                                  | 4.93 µs  | 26.5 µs       | 195.4 µs     | 5.4×     | 40×      |
+| Filter chain (six filters)                     | 15.7 µs  | syntax error  | 333.6 µs     |          | 21×      |
+| Date filters                                   | 34.7 µs  | 454.7 µs      | 717.2 µs     | 13×      | 21×      |
+| `if` / `elif` chain                            | 14.6 µs  | 26.0 µs       | 75.4 µs      | 1.8×     | 5.2×     |
+| Nested `{% with %}`                            | 59.1 µs  | not supported | 407.1 µs     |          | 6.9×     |
+| `forloop` variables                            | 14.0 µs  | 29.7 µs       | 195.2 µs     | 2.1×     | 14×      |
+| `{% cycle %}`                                  | 10.3 µs  | 29.8 µs       | 84.8 µs      | 2.9×     | 8.3×     |
+| Autoescaping HTML                              | 7.07 µs  | 22.4 µs       | 60.5 µs      | 3.2×     | 8.6×     |
+| Nested loops                                   | 34.5 µs  | 46.0 µs       | 372.9 µs     | 1.3×     | 11×      |
+| Boolean `{% if %}` (and, or, not, in)          | 12.2 µs  | 27.1 µs       | 61.6 µs      | 2.2×     | 5.1×     |
+| `{% translate %}` per row                      | 66.5 µs  | not supported | 187.4 µs     |          | 2.8×     |
+| Long text autoescaping                         | 22.6 µs  | 39.7 µs       | 82.1 µs      | 1.8×     | 3.6×     |
+| Text filters (truncatewords, linebreaksbr)     | 51.4 µs  | syntax error  | 284.7 µs     |          | 5.5×     |
+| `{% url %}` per row                            | 217.3 µs | 248.3 µs      | 360.1 µs     | 1.1×     | 1.7×     |
+| `{% csrf_token %}` per row                     | 2.53 µs  | 10.2 µs       | 22.5 µs      | 4.0×     | 8.9×     |
+| Empty loop (`{% empty %}`)                     | 368 ns   | 485 ns        | 2.47 µs      | 1.3×     | 6.7×     |
+| `{% spaceless %}`                              | 12.1 µs  | not supported | 104.6 µs     |          | 8.6×     |
+| Custom Python filter                           | 9.93 µs  | not supported | 65.4 µs      |          | 6.6×     |
+| Custom `simple_tag`                            | 47.3 µs  | not supported | 64.0 µs      |          | 1.4×     |
+| Custom `@register.tag`                         | 17.9 µs  | not supported | 33.6 µs      |          | 1.9×     |
+| `{% regroup %}`                                | 43.5 µs  | not supported | 281.8 µs     |          | 6.5×     |
+| Filter with a variable argument                | 8.33 µs  | 24.7 µs       | 87.6 µs      | 3.0×     | 11×      |
+| `{% include %}` per row                        | 24.9 µs  | 45.1 µs       | 226.9 µs     | 1.8×     | 9.1×     |
+| `{% extends %}` with three blocks              | 10.8 µs  | not supported | 122.5 µs     |          | 11×      |
+| Three-level `{% extends %}` with `block.super` | 12.1 µs  | not supported | 127.5 µs     |          | 11×      |
 
 "Not supported" means rusty raised an error because it does not
 implement the feature. "Syntax error" means rusty rejected template
@@ -95,11 +95,11 @@ database instead of plain Python objects.
 
 | Workload                                  | Oxide    | Rusty        | Stock Django | vs rusty | vs stock |
 |-------------------------------------------|---------:|-------------:|-------------:|---------:|---------:|
-| Model instances (User fields and methods) | 384.2 µs | wrong output | 880.5 µs     |          | 2.3×     |
-| Foreign keys (Permission to ContentType)  | 135.0 µs | 183.7 µs     | 295.4 µs     | 1.4×     | 2.2×     |
-| QuerySet queried during render            | 205.8 µs | 220.4 µs     | 269.8 µs     | 1.07×    | 1.3×     |
-| Lazy translation strings                  | 157.7 µs | 166.9 µs     | 281.6 µs     | 1.06×    | 1.8×     |
-| Form fields with errors                   | 295.3 µs | 306.3 µs     | 316.8 µs     | 1.04×    | 1.07×    |
+| Model instances (User fields and methods) | 375.7 µs | wrong output | 906.9 µs     |          | 2.4×     |
+| Foreign keys (Permission to ContentType)  | 136.4 µs | 189.3 µs     | 298.0 µs     | 1.4×     | 2.2×     |
+| QuerySet queried during render            | 208.3 µs | 220.3 µs     | 272.1 µs     | 1.06×    | 1.3×     |
+| Lazy translation strings                  | 159.9 µs | 170.8 µs     | 285.6 µs     | 1.07×    | 1.8×     |
+| Form fields with errors                   | 305.6 µs | 319.1 µs     | 329.0 µs     | 1.04×    | 1.08×    |
 
 "Wrong output" means rusty rendered the template but the result
 differed from stock Django's. The gap between engines narrows here
@@ -113,9 +113,9 @@ the way a view renders it.
 
 | Workload                                   | Oxide    | Rusty         | Stock Django | vs stock |
 |--------------------------------------------|---------:|--------------:|-------------:|---------:|
-| Django admin login page                    | 349.2 µs | not supported | 407.5 µs     | 1.2×     |
-| Django admin index page                    | 410.0 µs | not supported | 529.7 µs     | 1.3×     |
-| django-cotton page (layout, cards, badges) | 922.3 µs | wrong output  | 1.12 ms      | 1.2×     |
+| Django admin login page                    | 357.2 µs | not supported | 419.4 µs     | 1.2×     |
+| Django admin index page                    | 423.6 µs | not supported | 536.5 µs     | 1.3×     |
+| django-cotton page (layout, cards, badges) | 930.6 µs | wrong output  | 1.13 ms      | 1.2×     |
 
 Most of an admin page's time goes to context processors, URL
 reversing, and form rendering in Python, which a template engine
@@ -127,9 +127,9 @@ Compiling from source, with no cache.
 
 | Template size                        | Oxide    | Rusty    | Stock Django | vs rusty | vs stock |
 |--------------------------------------|---------:|---------:|-------------:|---------:|---------:|
-| Small (10 rows, about 120 nodes)     | 88.1 µs  | 88.9 µs  | 481.9 µs     | same     | 5.5×     |
-| Medium (100 rows, about 1,200 nodes) | 807.5 µs | 7.04 ms  | 4.85 ms      | 8.7×     | 6.0×     |
-| Large (500 rows, about 6,000 nodes)  | 4.01 ms  | 169.5 ms | 24.7 ms      | 42×      | 6.2×     |
+| Small (10 rows, about 120 nodes)     | 90.1 µs  | 91.0 µs  | 487.8 µs     | same     | 5.4×     |
+| Medium (100 rows, about 1,200 nodes) | 811.0 µs | 7.20 ms  | 4.88 ms      | 8.9×     | 6.0×     |
+| Large (500 rows, about 6,000 nodes)  | 4.08 ms  | 174.1 ms | 25.4 ms      | 43×      | 6.2×     |
 
 Oxide's compile time grows in proportion to template size. Rusty's
 grows faster than the template does. On the small template the two are
@@ -141,8 +141,8 @@ tied; see [Limitations](limitations.md) for why.
 
 | Loader                         | Oxide   | Rusty         | Stock Django | vs stock |
 |--------------------------------|--------:|--------------:|-------------:|---------:|
-| Cached loader (production)     | 11.8 µs | not supported | 124.3 µs     | 11×      |
-| No cache (compiles every time) | 93.7 µs | not supported | 267.8 µs     | 2.9×     |
+| Cached loader (production)     | 11.8 µs | not supported | 125.5 µs     | 11×      |
+| No cache (compiles every time) | 93.8 µs | not supported | 268.5 µs     | 2.9×     |
 
 ## Scaling with data size
 
@@ -150,12 +150,12 @@ The full table template at different row counts.
 
 | Rows  | Oxide    | Rusty    | Stock Django | vs rusty | vs stock |
 |------:|---------:|---------:|-------------:|---------:|---------:|
-| 1     | 2.65 µs  | 7.96 µs  | 18.5 µs      | 3.0×     | 7.0×     |
-| 10    | 9.84 µs  | 72.5 µs  | 152.4 µs     | 7.4×     | 15×      |
-| 100   | 79.3 µs  | 726.9 µs | 1.49 ms      | 9.2×     | 19×      |
-| 1,000 | 770.8 µs | 7.18 ms  | 15.0 ms      | 9.3×     | 20×      |
+| 1     | 2.03 µs  | 8.14 µs  | 18.6 µs      | 4.0×     | 9.2×     |
+| 10    | 8.29 µs  | 75.5 µs  | 156.3 µs     | 9.1×     | 19×      |
+| 100   | 69.8 µs  | 738.3 µs | 1.53 ms      | 11×      | 22×      |
+| 1,000 | 685.3 µs | 7.38 ms  | 15.3 ms      | 11×      | 22×      |
 
-Oxide settles at about 770 ns per row from 100 rows upward.
+Oxide settles at about 690 ns per row from 100 rows upward.
 
 ## Passing the context
 
@@ -164,41 +164,41 @@ different ways.
 
 | How the context is passed | Oxide   | Rusty         | Stock Django | vs rusty | vs stock |
 |---------------------------|--------:|--------------:|-------------:|---------:|---------:|
-| Plain dict                | 40.8 µs | 361.9 µs      | 749.2 µs     | 8.9×     | 18×      |
-| Django `Context` object   | 41.3 µs | not supported | 749.3 µs     |          | 18×      |
-| Dict with 200 extra keys  | 46.7 µs | 379.1 µs      | 750.8 µs     | 8.1×     | 16×      |
+| Plain dict                | 35.7 µs | 370.2 µs      | 767.1 µs     | 10×      | 21×      |
+| Django `Context` object   | 35.7 µs | not supported | 752.3 µs     |          | 21×      |
+| Dict with 200 extra keys  | 41.7 µs | 391.4 µs      | 775.2 µs     | 9.4×     | 19×      |
 
 ## Rendering from several threads
 
-Renders per second of the full table template (50 rows), with every
-thread sharing one compiled template. Larger is better. The number in
-brackets is the throughput relative to one thread.
+Renders per second of the full table template (50 rows). The threads
+share one compiled template and each renders its own data, the way a
+web server's threads share cached templates but build a new context
+for every request. Larger is better. The number in brackets is the
+throughput relative to one thread.
 
 Regular build (GIL on), where threads take turns and throughput is
 expected to stay flat:
 
 | Threads | Oxide           | Rusty          | Stock Django   |
 |--------:|----------------:|---------------:|---------------:|
-| 1       | 23,110/s (1.0×) | 2,569/s (1.0×) | 1,219/s (1.0×) |
-| 2       | 22,861/s (1.0×) | 2,564/s (1.0×) | 1,225/s (1.0×) |
-| 4       | 22,712/s (1.0×) | 2,569/s (1.0×) | 1,225/s (1.0×) |
-| 8       | 22,775/s (1.0×) | 2,560/s (1.0×) | 1,232/s (1.0×) |
+| 1       | 26,700/s (1.0×) | 2,501/s (1.0×) | 1,196/s (1.0×) |
+| 2       | 27,243/s (1.0×) | 2,487/s (1.0×) | 1,207/s (1.0×) |
+| 4       | 26,866/s (1.0×) | 2,507/s (1.0×) | 1,198/s (1.0×) |
+| 8       | 26,656/s (1.0×) | 2,496/s (1.0×) | 1,189/s (1.0×) |
 
 Free-threaded build (GIL off):
 
-| Threads | Oxide           | Rusty          | Stock Django   |
-|--------:|----------------:|---------------:|---------------:|
-| 1       | 22,097/s (1.0×) | 2,528/s (1.0×) | 1,159/s (1.0×) |
-| 2       | 22,004/s (1.0×) | 2,736/s (1.1×) | 1,624/s (1.4×) |
-| 4       | 30,315/s (1.4×) | 3,858/s (1.5×) | 2,843/s (2.5×) |
-| 8       | 21,813/s (1.0×) | 2,604/s (1.0×) | 2,159/s (1.9×) |
+| Threads | Oxide            | Rusty          | Stock Django   |
+|--------:|-----------------:|---------------:|---------------:|
+| 1       | 26,411/s (1.0×)  | 2,537/s (1.0×) | 1,170/s (1.0×) |
+| 2       | 48,021/s (1.8×)  | 2,714/s (1.1×) | 1,680/s (1.4×) |
+| 4       | 91,492/s (3.5×)  | 3,817/s (1.5×) | 2,985/s (2.6×) |
+| 8       | 129,691/s (4.9×) | 2,659/s (1.0×) | 2,138/s (1.8×) |
 
-On the free-threaded build, oxide does not yet get much faster with
-more threads: it peaks at 1.4× with four threads and drops back to the
-single-thread rate with eight. Stock Django gains more from extra
-threads, but with eight threads it still renders about a tenth as many
-pages per second as oxide does with one. See
-[Limitations](limitations.md).
+On the free-threaded build, oxide renders about five times as many
+pages per second with eight threads as with one. See
+[Limitations](limitations.md) for what still keeps it below eight
+times.
 
 ## Memory
 
@@ -209,9 +209,9 @@ times.
 
 | Engine       | Compile, regular | Render, regular | Compile, free-threaded | Render, free-threaded |
 |--------------|-----------------:|----------------:|-----------------------:|----------------------:|
-| Oxide        | 6.2 MB           | 0.2 MB          | 6.3 MB                 | 0.6 MB                |
-| Rusty        | 2.1 MB           | 0.7 MB          | 1.9 MB                 | 1.0 MB                |
-| Stock Django | 4.9 MB           | 1.0 MB          | 5.3 MB                 | 2.3 MB                |
+| Oxide        | 6.1 MB           | 0.3 MB          | 6.3 MB                 | 0.6 MB                |
+| Rusty        | 2.1 MB           | 0.7 MB          | 1.9 MB                 | 0.9 MB                |
+| Stock Django | 4.9 MB           | 1.0 MB          | 4.9 MB                 | 2.9 MB                |
 
 Oxide uses the most memory to compile a large template and the least
 to render one.

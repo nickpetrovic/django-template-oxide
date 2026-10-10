@@ -35,14 +35,14 @@ Time per render or compile. Smaller is better.
 
 | Workload                          | Oxide    | django-rusty-templates | Stock Django |
 |-----------------------------------|---------:|-----------------------:|-------------:|
-| Full table, 50 rows               | 41.4 µs  | 359.6 µs               | 760.1 µs     |
-| Date filters, 50 rows             | 52.0 µs  | 450.5 µs               | 712.9 µs     |
-| `{% url %}`, 50 rows              | 212.9 µs | 246.3 µs               | 354.4 µs     |
-| `{% extends %}` with three blocks | 10.5 µs  | not supported          | 120.9 µs     |
-| Django admin index page           | 410.0 µs | not supported          | 529.7 µs     |
-| Compile, 500 rows                 | 4.01 ms  | 169.5 ms               | 24.7 ms      |
+| Full table, 50 rows               | 35.4 µs  | 368.2 µs               | 758.1 µs     |
+| Date filters, 50 rows             | 34.7 µs  | 454.7 µs               | 717.2 µs     |
+| `{% url %}`, 50 rows              | 217.3 µs | 248.3 µs               | 360.1 µs     |
+| `{% extends %}` with three blocks | 10.8 µs  | not supported          | 122.5 µs     |
+| Django admin index page           | 423.6 µs | not supported          | 536.5 µs     |
+| Compile, 500 rows                 | 4.08 ms  | 174.1 ms               | 25.4 ms      |
 
-Across 50 workloads, oxide averages 6.2× faster than stock Django and 3.2× faster than django-rusty-templates on the 32 workloads that engine can run. Measured on a MacBook Pro (Apple M5 Max, 64 GB, macOS 27.0.1) with the regular CPython 3.14 build; the free-threaded build gives the same results to within a few percent. The full results, the software versions, and how to reproduce them are in [Performance](docs/performance.md).
+Across 50 workloads, oxide averages 6.4× faster than stock Django and 3.4× faster than django-rusty-templates on the 32 workloads that engine can run. Measured on a MacBook Pro (Apple M5 Max, 64 GB, macOS 27.0.1) with the regular CPython 3.14 build; the free-threaded build gives the same results to within a few percent, and on it eight threads render about 4.9 times as many pages per second as one. The full results, the software versions, and how to reproduce them are in [Performance](docs/performance.md).
 
 ## Documentation
 

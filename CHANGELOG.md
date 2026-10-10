@@ -9,6 +9,18 @@ minor versions.
 
 ## Unreleased
 
+### Fixed
+
+- Rendering now speeds up with more threads on free-threaded Python
+  (3.14t). Before, eight threads rendered no more pages per second than
+  one, because every render kept touching a few objects and locks that
+  all threads share: the reference count of each loop item's class,
+  the attribute descriptors of `datetime`, Django's translation
+  objects, and PyO3's global reference pool. Eight threads now render
+  about 4.9 times as many pages per second as one.
+- Rendering is about 15% faster on a single thread, and formatting
+  dates about a third faster, from the same changes.
+
 ### Changed
 
 - Rewrote the benchmark. Each result is now the median of several

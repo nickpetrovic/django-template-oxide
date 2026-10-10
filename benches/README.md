@@ -69,7 +69,7 @@ uvx maturin develop --release
 | `loading` | `get_template` plus render the way views do it, with the cached loader and with no cache |
 | `scaling` | The full table template at 1, 10, 100, and 1,000 rows |
 | `context` | Passing a plain dict, a Django `Context` object, and a dict with 200 extra keys |
-| `threads` | Renders per second from 1, 2, 4, and 8 threads sharing one compiled template |
+| `threads` | Renders per second from 1, 2, 4, and 8 threads sharing one compiled template, each rendering its own data |
 | `memory` | Extra peak memory of a fresh process while compiling the large template and rendering 1,000 rows |
 
 The django-cotton page and the memory measurements run in separate
