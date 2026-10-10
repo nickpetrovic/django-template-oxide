@@ -9,6 +9,8 @@ minor versions.
 
 ## Unreleased
 
+## 0.1.1 (2026-10-09)
+
 ### Fixed
 
 - Rendering now speeds up with more threads on free-threaded Python

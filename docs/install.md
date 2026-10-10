@@ -34,7 +34,7 @@ after any change to the Rust source.
 ```python
 >>> import django_template_oxide
 >>> django_template_oxide.__version__
-'0.1.0'
+'0.1.1'
 >>> from django_template_oxide.backend import OxideTemplates
 >>> OxideTemplates
 <class 'django_template_oxide.backend.OxideTemplates'>

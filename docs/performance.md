@@ -18,7 +18,7 @@ engine.
 | Python, free-threaded  | CPython 3.14.7 (3.14t), GIL off                  |
 | Django                 | 6.1.2                                            |
 | Rust                   | 1.96.1                                           |
-| django-template-oxide  | 0.1.0, commit `ca15b1b`                          |
+| django-template-oxide  | 0.1.1                                            |
 | django-rusty-templates | 0.1.0, commit `5adbe61`                          |
 
 Run on October 9, 2026, with the default settings: 50 rows of data,
