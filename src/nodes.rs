@@ -1051,13 +1051,13 @@ struct TypeBehavior {
 /// attribute checks; later sightings are a hashmap probe.
 #[inline]
 fn type_behavior(obj: &Bound<'_, pyo3::PyAny>) -> TypeBehavior {
-    let py_type = obj.get_type();
-    let type_ptr = py_type.as_ptr() as usize;
+    let type_ptr = obj.get_type_ptr() as usize;
 
     TYPE_BEHAVIOR_CACHE.with(|cache| {
         if let Some((_, cached)) = cache.borrow().get(&type_ptr) {
             return *cached;
         }
+        let py_type = obj.get_type();
         let behavior = TypeBehavior {
             supports_getitem: py_type.hasattr("__getitem__").unwrap_or(false),
             is_callable: obj.is_callable(),
@@ -1344,13 +1344,13 @@ pub fn render_value_in_context_into(
             let _ = write!(out, "{n}");
         }
         Value::Float(f) if context.renders_integers_natively() => {
-            Python::attach(|py| render_float_into(py, *f, context, out))?;
+            crate::python_cache::attach(|py| render_float_into(py, *f, context, out))?;
         }
         Value::PyObject(obj) => {
-            Python::attach(|py| render_python_value_into(obj.bind(py), context, out))?;
+            crate::python_cache::attach(|py| render_python_value_into(obj.bind(py), context, out))?;
         }
         other => {
-            Python::attach(|py| {
+            crate::python_cache::attach(|py| {
                 let obj = other.to_pyobject(py);
                 render_python_value_into(obj.bind(py), context, out)
             })?;
@@ -1513,7 +1513,7 @@ mod tests {
 
     #[test]
     fn test_text_node_render() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let node = TextNode::new("Hello, world!");
             let mut ctx = Context::new(None);
             assert_eq!(node.render(py, &mut ctx).unwrap(), "Hello, world!");
@@ -1522,7 +1522,7 @@ mod tests {
 
     #[test]
     fn test_text_node_render_annotated_skips_errors() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let node = TextNode::new("<script>alert('xss')</script>");
             let mut ctx = Context::new(None);
             let result = node.render_annotated(py, &mut ctx).unwrap();
@@ -1551,7 +1551,7 @@ mod tests {
 
     #[test]
     fn test_nodelist_render_joins() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let mut nl = NodeList::new();
             nl.push(Box::new(TextNode::new("Hello, ")));
             nl.push(Box::new(TextNode::new("world!")));
@@ -1564,7 +1564,7 @@ mod tests {
 
     #[test]
     fn test_nodelist_empty_render() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let nl = NodeList::new();
             let mut ctx = Context::new(None);
             let result = nl.render(py, &mut ctx).unwrap();
@@ -1679,7 +1679,7 @@ mod tests {
 
     #[test]
     fn test_variable_node_render_simple() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let fe = FilterExpression::parse("name", |_| {
                 Ok(ParsedFilter {
                     name: String::new(),
@@ -1696,7 +1696,7 @@ mod tests {
 
     #[test]
     fn test_variable_node_render_escapes_html() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let fe = FilterExpression::parse("content", |_| {
                 Ok(ParsedFilter {
                     name: String::new(),
@@ -1716,7 +1716,7 @@ mod tests {
 
     #[test]
     fn test_variable_node_render_missing_variable() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let fe = FilterExpression::parse("missing", |_| {
                 Ok(ParsedFilter {
                     name: String::new(),

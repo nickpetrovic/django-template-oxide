@@ -78,17 +78,19 @@ impl Template {
         let tokens = {
             let _g = crate::prof::Guard::new("compile_nodelist:tokenize");
             let use_python_lexer = engine.is_some_and(|eng| {
-                Python::attach(|py| needs_python_lexer(py, eng).unwrap_or(false))
+                crate::python_cache::attach(|py| needs_python_lexer(py, eng).unwrap_or(false))
             });
             if use_python_lexer {
-                Python::attach(|py| -> Result<Vec<crate::lexer::Token>, TemplateError> {
-                    py_tokenize_via_django(
-                        py,
-                        source,
-                        debug,
-                        engine.expect("use_python_lexer is only true when engine is Some"),
-                    )
-                })?
+                crate::python_cache::attach(
+                    |py| -> Result<Vec<crate::lexer::Token>, TemplateError> {
+                        py_tokenize_via_django(
+                            py,
+                            source,
+                            debug,
+                            engine.expect("use_python_lexer is only true when engine is Some"),
+                        )
+                    },
+                )?
             } else if debug {
                 let mut lexer = DebugLexer::new(source);
                 lexer.tokenize()
@@ -107,7 +109,7 @@ impl Template {
         parser.origin = Some(origin);
         crate::tags::register_default_tags(&mut parser);
 
-        Python::attach(|py| -> Result<(), TemplateError> {
+        crate::python_cache::attach(|py| -> Result<(), TemplateError> {
             let engine_builtins = engine.and_then(|engine_obj| {
                 engine_obj
                     .getattr(pyo3::intern!(py, "template_builtins"))
@@ -324,7 +326,7 @@ pub fn render_to_string(
     let template = Template::new(template_string, None, false, None)?;
     let context_dict: ContextDict = variables;
     let mut context = Context::new(Some(context_dict));
-    Python::attach(|py| template.render(py, &mut context))
+    crate::python_cache::attach(|py| template.render(py, &mut context))
 }
 
 // Tests
@@ -397,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_render_text_only() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let t = Template::new("Hello world", None, false, None).unwrap();
             let mut ctx = Context::new(None);
             assert_eq!(t.render(py, &mut ctx).unwrap(), "Hello world");
@@ -406,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_render_with_variable() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let t = Template::new("Hello, {{ name }}!", None, false, None).unwrap();
             let mut vars = HashMap::new();
             vars.insert("name".to_owned(), Value::String("Alice".to_owned()));
@@ -417,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_render_missing_variable() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let t = Template::new("Hello, {{ name }}!", None, false, None).unwrap();
             let mut ctx = Context::new(None);
             assert_eq!(t.render(py, &mut ctx).unwrap(), "Hello, !");
@@ -426,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_render_multiple_variables() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let t = Template::new("{{ greeting }}, {{ name }}!", None, false, None).unwrap();
             let mut vars = HashMap::new();
             vars.insert("greeting".to_owned(), Value::String("Hi".to_owned()));
@@ -438,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_render_integer_value() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let t = Template::new("Count: {{ n }}", None, false, None).unwrap();
             let mut vars = HashMap::new();
             vars.insert("n".to_owned(), Value::Int(42));
@@ -449,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_render_bool_value() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let t = Template::new("Active: {{ flag }}", None, false, None).unwrap();
             let mut vars = HashMap::new();
             vars.insert("flag".to_owned(), Value::Bool(true));

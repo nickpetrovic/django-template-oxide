@@ -177,7 +177,7 @@ fn python_split(s: &str) -> Vec<&str> {
 }
 
 fn python_truthy(value: &Value) -> Option<bool> {
-    Python::attach(|py| crate::tags::python_truthy(py, value).ok())
+    crate::python_cache::attach(|py| crate::tags::python_truthy(py, value).ok())
 }
 
 enum IntConversion {
@@ -356,7 +356,7 @@ fn with_exact_sequence<R>(
 ) -> Option<R> {
     match value {
         Value::List(items) => Some(read(ExactSequence::Native(items))),
-        Value::PyObject(obj) => Python::attach(|py| {
+        Value::PyObject(obj) => crate::python_cache::attach(|py| {
             let bound = obj.bind(py);
             if let Ok(list) = bound.cast_exact::<PyList>() {
                 Some(read(ExactSequence::List(list)))
@@ -824,7 +824,7 @@ fn filter_length(value: &Value, _args: &[Value], _autoescape: bool) -> Option<Va
         Value::List(items) => Some(Value::Int(items.len() as i64)),
         Value::Dict(map) => Some(Value::Int(map.len() as i64)),
         Value::None | Value::Bool(_) | Value::Int(_) | Value::Float(_) => Some(Value::Int(0)),
-        Value::PyObject(obj) => Python::attach(|py| match obj.bind(py).len() {
+        Value::PyObject(obj) => crate::python_cache::attach(|py| match obj.bind(py).len() {
             Ok(n) => Some(Value::Int(n as i64)),
             Err(err)
                 if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
@@ -983,7 +983,8 @@ fn filter_date(value: &Value, args: &[Value], _autoescape: bool) -> Option<Value
             format_str => format_str,
         },
     };
-    Python::attach(|py| date_format::try_format(py, obj.bind(py), format_str)).map(Value::String)
+    crate::python_cache::attach(|py| date_format::try_format(py, obj.bind(py), format_str))
+        .map(Value::String)
 }
 
 fn filter_default(value: &Value, args: &[Value], _autoescape: bool) -> Option<Value> {

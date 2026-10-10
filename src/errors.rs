@@ -84,7 +84,9 @@ impl Clone for TemplateError {
                 tried: tried.clone(),
                 chain: chain.clone(),
             },
-            Self::PythonError(e) => Self::PythonError(Python::attach(|py| e.clone_ref(py))),
+            Self::PythonError(e) => {
+                Self::PythonError(crate::python_cache::attach(|py| e.clone_ref(py)))
+            }
             Self::Internal(s) => Self::Internal(s.clone()),
             Self::NodeOutputNotString { index, type_name } => Self::NodeOutputNotString {
                 index: *index,
@@ -139,7 +141,7 @@ impl From<TemplateError> for PyErr {
             not_string @ TemplateError::NodeOutputNotString { .. } => {
                 pyo3::exceptions::PyTypeError::new_err(not_string.to_string())
             }
-            other => Python::attach(|py| match crate::python_cache::django(py) {
+            other => crate::python_cache::attach(|py| match crate::python_cache::django(py) {
                 Ok(dj) => {
                     let (cls, msg) = match &other {
                         TemplateError::VariableDoesNotExist { .. } => (
@@ -178,7 +180,7 @@ impl From<TemplateError> for PyErr {
 
 impl From<PyErr> for TemplateError {
     fn from(err: PyErr) -> Self {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             // Preserve Django's TemplateSyntaxError class for callers
             // (debug page, user `except TemplateSyntaxError`).
             let is_template_syntax_error = crate::python_cache::django(py)

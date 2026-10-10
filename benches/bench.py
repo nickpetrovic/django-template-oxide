@@ -360,11 +360,19 @@ def section_context(engines, args, progress, cases):
 
 
 def section_threads(engines, args, progress, cases):
-    context = {"applications": cases.build_applications(args.items)}
-
     def build(engine):
         template = engine.from_string(cases.FULL_TEMPLATE)
-        return lambda: template.render(context)
+        context = {"applications": cases.build_applications(args.items)}
+
+        def render():
+            return template.render(context)
+
+        def per_thread():
+            own = {"applications": cases.build_applications(args.items)}
+            return lambda: template.render(own)
+
+        render.per_thread = per_thread
+        return render
 
     callables = harness.checked_callables(engines, build)
     duration = 0.2 if args.quick else 0.5
@@ -377,7 +385,7 @@ def section_threads(engines, args, progress, cases):
                 results[name] = fn
                 continue
             try:
-                results[name] = harness.throughput(fn, threads, duration)
+                results[name] = harness.throughput(fn.per_thread, threads, duration)
             except Exception as error:
                 results[name] = harness.failure_from(error)
         rows.append({"label": str(threads), "results": results})
@@ -391,8 +399,9 @@ def section_threads(engines, args, progress, cases):
         "key": "threads",
         "kind": "throughput",
         "title": "Rendering from several threads",
-        "caption": f"Renders per second of the full table template ({args.items} rows), "
-        f"all threads sharing one compiled template. {note}",
+        "caption": f"Renders per second of the full table template ({args.items} rows). "
+        "The threads share one compiled template and each renders its own data, the "
+        f"way a web server's threads share cached templates. {note}",
         "engines": list(setup_env.ENGINE_NAMES),
         "rows": rows,
     }

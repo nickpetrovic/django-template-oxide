@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDate, PyDateTime};
+use pyo3::types::{PyAny, PyDate, PyDateAccess, PyDateTime, PyString, PyTimeAccess};
 
 const FORMAT_CHARS: &str = "aAbcdDeEfFgGhHiIjlLmMnNoOPrsStTUuwWyYzZ";
 const TIME_FORMAT_CHARS: &str = "aAefgGhHiOPsTuZ";
@@ -106,69 +107,78 @@ fn activation_variable<'py>(active: &Bound<'py, PyAny>) -> Option<Bound<'py, PyA
 
 type CachedActivationVariable = Option<(Py<PyAny>, Option<Py<PyAny>>)>;
 
+fn module_global_ptr(module: &Bound<'_, PyAny>, name: &Bound<'_, PyString>) -> *mut ffi::PyObject {
+    let found = unsafe {
+        let dict = ffi::PyModule_GetDict(module.as_ptr());
+        if dict.is_null() {
+            std::ptr::null_mut()
+        } else {
+            ffi::PyDict_GetItemWithError(dict, name.as_ptr())
+        }
+    };
+    if found.is_null() {
+        let _ = PyErr::take(module.py());
+    }
+    found
+}
+
+fn context_var_value<'py>(py: Python<'py>, variable: &Py<PyAny>) -> Option<Bound<'py, PyAny>> {
+    let mut value: *mut ffi::PyObject = std::ptr::null_mut();
+    let status =
+        unsafe { ffi::PyContextVar_Get(variable.as_ptr(), std::ptr::null_mut(), &mut value) };
+    if status < 0 {
+        let _ = PyErr::take(py);
+        return None;
+    }
+    if value.is_null() {
+        return Some(py.None().into_bound(py));
+    }
+    Some(unsafe { Bound::from_owned_ptr(py, value) })
+}
+
 fn current_activation(py: Python<'_>) -> Option<Bound<'_, PyAny>> {
     thread_local! {
         static ACTIVATION_VARIABLE: std::cell::RefCell<CachedActivationVariable> =
             const { std::cell::RefCell::new(None) };
     }
-    let active = crate::python_cache::django(py)
-        .ok()?
-        .trans_real
-        .bind(py)
-        .getattr(pyo3::intern!(py, "_active"))
-        .ok()?;
+    let trans_real = crate::python_cache::django(py).ok()?.trans_real.bind(py);
+    let active_ptr = module_global_ptr(trans_real, pyo3::intern!(py, "_active"));
     let cached = ACTIVATION_VARIABLE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|(cached_active, variable)| {
-                cached_active
-                    .bind(py)
-                    .is(&active)
-                    .then(|| variable.as_ref().map(|v| v.clone_ref(py)))
-            })
+        let cell = cell.borrow();
+        let (cached_active, variable) = cell.as_ref()?;
+        (!active_ptr.is_null() && std::ptr::eq(cached_active.as_ptr(), active_ptr))
+            .then(|| variable.as_ref().and_then(|v| context_var_value(py, v)))
     });
-    let variable = match cached {
-        Some(variable) => variable,
-        None => {
-            let variable = activation_variable(&active).map(Bound::unbind);
-            ACTIVATION_VARIABLE.with(|cell| {
-                *cell.borrow_mut() = Some((
-                    active.clone().unbind(),
-                    variable.as_ref().map(|v| v.clone_ref(py)),
-                ));
-            });
-            variable
-        }
-    }?;
-    variable
-        .bind(py)
-        .call_method1(pyo3::intern!(py, "get"), (py.None(),))
-        .ok()
+    if let Some(value) = cached {
+        return value;
+    }
+    let active = trans_real.getattr(pyo3::intern!(py, "_active")).ok()?;
+    let variable = activation_variable(&active).map(Bound::unbind);
+    let value = variable.as_ref().and_then(|v| context_var_value(py, v));
+    ACTIVATION_VARIABLE.with(|cell| *cell.borrow_mut() = Some((active.unbind(), variable)));
+    value
 }
 
 fn revalidate_render_locale(py: Python<'_>) -> PyResult<()> {
     let epoch = LOCALE_EPOCH.with(std::cell::Cell::get);
-    let stored = RENDER_LOCALE.with(|cell| {
-        let snapshot = cell.borrow();
-        (snapshot.epoch != epoch).then(|| {
-            (
-                snapshot.activation.as_ref().map(|a| a.clone_ref(py)),
-                snapshot.language.as_ref().map(|l| l.clone_ref(py)),
-            )
-        })
-    });
-    let Some((stored_activation, stored_language)) = stored else {
+    if RENDER_LOCALE.with(|cell| cell.borrow().epoch == epoch) {
         return Ok(());
-    };
+    }
     let activation = current_activation(py);
-    let same_activation = match (&stored_activation, &activation) {
-        (Some(stored), Some(current)) => stored.bind(py).is(current),
-        _ => false,
-    };
-    if same_activation && stored_language.is_some() {
+    let same_activation = RENDER_LOCALE.with(|cell| {
+        let snapshot = cell.borrow();
+        snapshot.language.is_some()
+            && match (&snapshot.activation, &activation) {
+                (Some(stored), Some(current)) => std::ptr::eq(stored.as_ptr(), current.as_ptr()),
+                _ => false,
+            }
+    });
+    if same_activation {
         RENDER_LOCALE.with(|cell| cell.borrow_mut().epoch = epoch);
         return Ok(());
     }
+    let stored_language =
+        RENDER_LOCALE.with(|cell| cell.borrow().language.as_ref().map(|l| l.clone_ref(py)));
     let language = crate::python_cache::django(py)?
         .get_language
         .bind(py)
@@ -240,15 +250,20 @@ fn locale_names(py: Python<'_>) -> PyResult<Arc<LocaleNames>> {
     if let Some(names) = current_render_locale(py, |snapshot| snapshot.names.clone())? {
         return Ok(names);
     }
-    let names = shared_locale_names(py)?;
+    let language =
+        RENDER_LOCALE.with(|cell| cell.borrow().language.as_ref().map(|l| l.clone_ref(py)));
+    let names = shared_locale_names(py, language)?;
     update_render_locale(|snapshot| snapshot.names = Some(Arc::clone(&names)));
     Ok(names)
 }
 
-fn shared_locale_names(py: Python<'_>) -> PyResult<Arc<LocaleNames>> {
+fn shared_locale_names(py: Python<'_>, language: Option<Py<PyAny>>) -> PyResult<Arc<LocaleNames>> {
     static CACHE: OnceLock<Mutex<LocaleCache>> = OnceLock::new();
     let dj = crate::python_cache::django(py)?;
-    let language = dj.get_language.bind(py).call0()?;
+    let language = match language {
+        Some(language) => language.into_bound(py),
+        None => dj.get_language.bind(py).call0()?,
+    };
     let key = if language.is_none() {
         String::new()
     } else {
@@ -370,27 +385,27 @@ struct Components {
 }
 
 fn components(value: &Bound<'_, PyAny>, is_datetime: bool) -> PyResult<Components> {
-    let int = |name: &str| -> PyResult<i64> { value.getattr(name)?.extract::<i64>() };
+    if is_datetime {
+        let dt = value.cast_exact::<PyDateTime>()?;
+        return Ok(Components {
+            year: dt.get_year(),
+            month: u32::from(dt.get_month()),
+            day: u32::from(dt.get_day()),
+            hour: u32::from(dt.get_hour()),
+            minute: u32::from(dt.get_minute()),
+            second: u32::from(dt.get_second()),
+            microsecond: dt.get_microsecond(),
+        });
+    }
+    let date = value.cast_exact::<PyDate>()?;
     Ok(Components {
-        year: int("year")? as i32,
-        month: int("month")? as u32,
-        day: int("day")? as u32,
-        hour: if is_datetime { int("hour")? as u32 } else { 0 },
-        minute: if is_datetime {
-            int("minute")? as u32
-        } else {
-            0
-        },
-        second: if is_datetime {
-            int("second")? as u32
-        } else {
-            0
-        },
-        microsecond: if is_datetime {
-            int("microsecond")? as u32
-        } else {
-            0
-        },
+        year: date.get_year(),
+        month: u32::from(date.get_month()),
+        day: u32::from(date.get_day()),
+        hour: 0,
+        minute: 0,
+        second: 0,
+        microsecond: 0,
     })
 }
 

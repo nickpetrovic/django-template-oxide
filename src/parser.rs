@@ -188,7 +188,7 @@ impl Parser {
                             rust_fn(self, &token).map_err(|e| self.error(&token, e))?
                         }
                         Some(TagCompileFunc::Python(py_fn)) => {
-                            let py_fn = Python::attach(|py| py_fn.clone_ref(py));
+                            let py_fn = crate::python_cache::attach(|py| py_fn.clone_ref(py));
                             dispatch_python_compile_fn(self, &py_fn, &token)
                                 .map_err(|e| self.error(&token, e))?
                         }
@@ -340,7 +340,7 @@ impl Parser {
         let mut fe = FilterExpression::parse(token, |filter_name| self.find_filter(filter_name))?;
 
         if !fe.filters.is_empty() {
-            let (funcs, natives) = pyo3::Python::attach(|py| -> Result<_, TemplateError> {
+            let (funcs, natives) = crate::python_cache::attach(|py| -> Result<_, TemplateError> {
                 let mut funcs = Vec::with_capacity(fe.filters.len());
                 let mut natives = Vec::with_capacity(fe.filters.len());
                 for pf in &fe.filters {
@@ -443,7 +443,7 @@ fn dispatch_python_compile_fn(
 ) -> Result<Box<dyn Node>, TemplateError> {
     use pyo3::prelude::*;
 
-    Python::attach(|py| -> PyResult<Box<dyn Node>> {
+    crate::python_cache::attach(|py| -> PyResult<Box<dyn Node>> {
         // SAFETY: see fn-level docs.
         let py_parser = Py::new(py, unsafe {
             crate::django_drop_in::PyParser::from_raw(parser as *mut Parser)

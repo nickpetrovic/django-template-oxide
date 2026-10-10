@@ -165,14 +165,22 @@ def measure(callables, repeats, target_seconds):
     return results
 
 
-def _throughput_once(fn, threads, duration):
+def _throughput_once(make, threads, duration):
     barrier = threading.Barrier(threads + 1)
     stop = threading.Event()
     counts = [0] * threads
     errors = []
 
     def worker(slot):
+        fn = None
+        try:
+            fn = make()
+            fn()
+        except Exception as error:
+            errors.append(error)
         barrier.wait()
+        if fn is None:
+            return
         done = 0
         try:
             while not stop.is_set():
@@ -197,8 +205,8 @@ def _throughput_once(fn, threads, duration):
     return sum(counts) / elapsed
 
 
-def throughput(fn, threads, duration, repeats=3):
-    values = [_throughput_once(fn, threads, duration) for _ in range(repeats)]
+def throughput(make, threads, duration, repeats=3):
+    values = [_throughput_once(make, threads, duration) for _ in range(repeats)]
     mean = statistics.fmean(values)
     spread = statistics.stdev(values) / mean if len(values) > 1 and mean else 0.0
     return Throughput(statistics.median(values), spread)

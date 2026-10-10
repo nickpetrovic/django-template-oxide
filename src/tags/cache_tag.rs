@@ -144,7 +144,7 @@ pub fn compile_cache(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>
 
     let bits = token.split_contents();
     if bits.len() < 3 {
-        let tag_repr = Python::attach(|py| -> PyResult<String> {
+        let tag_repr = crate::python_cache::attach(|py| -> PyResult<String> {
             Ok(pyo3::types::PyString::new(py, &bits[0]).repr()?.to_string())
         })?;
         return Err(TemplateError::TemplateSyntaxError(format!(

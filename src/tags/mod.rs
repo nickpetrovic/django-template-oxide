@@ -1073,7 +1073,7 @@ pub fn compile_load(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>,
             )
         })?;
 
-        Python::attach(|py| -> Result<(), TemplateError> {
+        crate::python_cache::attach(|py| -> Result<(), TemplateError> {
             let lib = resolve_library(parser, py, lib_name)?;
             register_library_tags(parser, py, &lib, Some(&bits[1..fi]))?;
             Ok(())
@@ -1081,7 +1081,7 @@ pub fn compile_load(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node>,
     } else {
         // {% load library1 library2 %}
         for lib_name in &bits[1..] {
-            Python::attach(|py| -> Result<(), TemplateError> {
+            crate::python_cache::attach(|py| -> Result<(), TemplateError> {
                 let lib = resolve_library(parser, py, lib_name)?;
                 register_library_tags(parser, py, &lib, None)?;
                 Ok(())
@@ -1374,7 +1374,7 @@ pub fn compile_filter(parser: &mut Parser, token: &Token) -> Result<Box<dyn Node
     let filter_chain = bits[1..].join(" ");
     let filter_token = format!("var|{}", filter_chain);
     let filter_expr = parser.compile_filter(&filter_token)?;
-    Python::attach(|py| -> Result<(), TemplateError> {
+    crate::python_cache::attach(|py| -> Result<(), TemplateError> {
         for func in filter_expr.filter_funcs.iter() {
             let filter_name = func
                 .bind(py)
@@ -1419,7 +1419,7 @@ impl Node for CsrfTokenNode {
                 s.as_ref().to_owned()
             }
             Some(Value::PyObject(obj)) => {
-                let s = Python::attach(|py| {
+                let s = crate::python_cache::attach(|py| {
                     obj.bind(py)
                         .str()
                         .map(|s| s.to_string_lossy().into_owned())
@@ -1945,7 +1945,7 @@ mod tests {
         let nodelist = parse_template(source)?;
         let ctx_dict: ContextDict = vars.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
         let mut context = Context::new(Some(ctx_dict));
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let safe = nodelist.render(py, &mut context)?;
             Ok(safe.as_str().to_owned())
         })
@@ -2284,7 +2284,7 @@ mod tests {
 
     #[test]
     fn test_python_truthy() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let truthy = |value: Value| python_truthy(py, &value).unwrap();
             assert!(!truthy(Value::None));
             assert!(!truthy(Value::Bool(false)));

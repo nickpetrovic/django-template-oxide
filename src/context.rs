@@ -142,7 +142,7 @@ impl fmt::Display for Value {
             Value::String(s) => write!(f, "{s}"),
             Value::SafeString(s) => f.write_str(s),
             Value::List(_) | Value::Dict(_) => {
-                let s = Python::attach(|py| {
+                let s = crate::python_cache::attach(|py| {
                     self.to_pyobject(py)
                         .bind(py)
                         .str()
@@ -154,7 +154,7 @@ impl fmt::Display for Value {
             Value::PyObject(obj) => {
                 // Call Python's str() to get the string representation.
                 // This requires the GIL, which we acquire here.
-                let s = Python::attach(|py| {
+                let s = crate::python_cache::attach(|py| {
                     obj.bind(py)
                         .str()
                         .map(|s| s.to_string_lossy().into_owned())
@@ -255,7 +255,10 @@ impl<'py> From<&Bound<'py, PyAny>> for Value {
         }
 
         if let Ok(dj) = crate::python_cache::django(obj.py())
-            && obj.get_type().is(dj.safe_string_cls.bind(obj.py()))
+            && std::ptr::eq(
+                obj.get_type_ptr().cast::<pyo3::ffi::PyObject>(),
+                dj.safe_string_cls.as_ptr(),
+            )
             && let Ok(v) = obj.extract::<String>()
         {
             return Value::SafeString(std::sync::Arc::from(v));
@@ -705,7 +708,7 @@ impl Context {
             return true;
         }
         !self.use_thousand_separator.get_or_load(|| {
-            Python::attach(|py| {
+            crate::python_cache::attach(|py| {
                 crate::python_cache::django(py)
                     .ok()
                     .and_then(|dj| {
@@ -920,7 +923,7 @@ impl PartialEq for RenderKey {
                 if a.is(b) {
                     return true;
                 }
-                Python::attach(|py| a.bind(py).eq(b.bind(py)).unwrap_or(false))
+                crate::python_cache::attach(|py| a.bind(py).eq(b.bind(py)).unwrap_or(false))
             }
             _ => false,
         }
@@ -1526,7 +1529,7 @@ mod tests {
 
     #[test]
     fn test_value_from_python_none() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let binding = pyo3::types::PyNone::get(py);
             let none = binding.as_any();
             let v = Value::from(none);
@@ -1536,7 +1539,7 @@ mod tests {
 
     #[test]
     fn test_value_from_python_bool() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let t = true.into_pyobject(py).unwrap();
             let v = Value::from(t.as_any());
             assert_eq!(v, Value::Bool(true));
@@ -1545,7 +1548,7 @@ mod tests {
 
     #[test]
     fn test_value_from_python_int() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let n = 42i64.into_pyobject(py).unwrap();
             let v = Value::from(n.as_any());
             assert_eq!(v, Value::Int(42));
@@ -1554,7 +1557,7 @@ mod tests {
 
     #[test]
     fn test_value_from_python_float() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let f = 3.14f64.into_pyobject(py).unwrap();
             let v = Value::from(f.as_any());
             assert_eq!(v, Value::Float(3.14));
@@ -1563,7 +1566,7 @@ mod tests {
 
     #[test]
     fn test_value_from_python_string() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let s = "hello".into_pyobject(py).unwrap();
             let v = Value::from(s.as_any());
             assert_eq!(v, Value::String("hello".into()));
@@ -1573,7 +1576,7 @@ mod tests {
     #[test]
     fn test_value_from_python_list() {
         // Lists are kept as PyObject (lazy access) for performance.
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let list = PyList::new(py, [1i64, 2, 3]).unwrap();
             let v = Value::from(list.as_any());
             assert!(matches!(v, Value::PyObject(_)));
@@ -1583,7 +1586,7 @@ mod tests {
     #[test]
     fn test_value_from_python_dict() {
         // Dicts are kept as PyObject (lazy access) for performance.
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let dict = PyDict::new(py);
             dict.set_item("a", 1i64).unwrap();
             dict.set_item("b", "two").unwrap();
@@ -1594,7 +1597,7 @@ mod tests {
 
     #[test]
     fn test_value_from_python_arbitrary_object() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             // A Python `object()` instance has no special mapping.
             let obj = py.eval(c"object()", None, None).unwrap();
             let v = Value::from(&obj);
@@ -1604,7 +1607,7 @@ mod tests {
 
     #[test]
     fn test_value_roundtrip_to_pyobject() {
-        Python::attach(|py| {
+        crate::python_cache::attach(|py| {
             let original = Value::Int(42);
             let py_obj = original.to_pyobject(py);
             let back = Value::from(py_obj.bind(py));

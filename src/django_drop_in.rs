@@ -193,7 +193,7 @@ impl PyOpaqueNode {
 
 impl Clone for PyOpaqueNode {
     fn clone(&self) -> Self {
-        Python::attach(|py| Self {
+        crate::python_cache::attach(|py| Self {
             py_node: self.py_node.clone_ref(py),
             token_field: self.token_field.clone(),
             origin_field: self.origin_field.clone(),

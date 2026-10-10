@@ -107,3 +107,15 @@ pub fn django(py: Python<'_>) -> PyResult<&'static DjangoModules> {
     let _ = DJANGO.set(modules);
     Ok(DJANGO.get().expect("DJANGO was just set or had a value"))
 }
+
+#[inline]
+pub fn attach<F, R>(f: F) -> R
+where
+    F: for<'py> FnOnce(Python<'py>) -> R,
+{
+    if unsafe { pyo3::ffi::PyThreadState_GetUnchecked() }.is_null() {
+        Python::attach(f)
+    } else {
+        f(unsafe { Python::assume_attached() })
+    }
+}
