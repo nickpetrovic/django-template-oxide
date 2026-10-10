@@ -2,7 +2,7 @@
 
 ## Build
 
-You need Rust 1.85+ and Python 3.10+.
+You need Rust 1.88+ and Python 3.14+.
 
 ```sh
 uv sync --group dev
@@ -15,22 +15,29 @@ That builds the Rust extension into your local venv. Re-run
 ## Test
 
 ```sh
-uv run pytest tests/
+uvx maturin develop --release   # rebuild after any Rust change
+uv run pytest tests/            # Python suites
+cargo test                      # Rust unit tests
+scripts/check.sh                # everything above, plus fmt, clippy, rustdoc, unused deps, advisories, and the differential fuzzer
 ```
 
-2476 Python tests: 962 in oxide's own regression/compliance suite
-(`test_regressions.py`, `test_compliance.py`, `test_basic_rendering.py`,
-`test_oxide_backend.py`, `test_parity.py`) plus 1514 vendored Django
-`template_tests` routed through the oxide backend. 2474 pass; 2 are
-skipped (a case-insensitive-filesystem guard in `test_loaders`, and an
-environment-dependent i18n compilation test that fails identically
-without oxide on Python 3.14).
+The Python suites have 3081 tests:
 
-The Rust unit tests (331) run separately:
+- 1551 in oxide's own suites: `test_regressions.py`,
+  `test_compliance.py`, `test_basic_rendering.py`,
+  `test_oxide_backend.py`, `test_parity.py`, and
+  `test_django_parity_matrix.py`. The parity matrix renders every
+  built-in filter, lookup, tag, and localization case through stock
+  Django and oxide and requires the same output, exception type, and
+  error message.
+- 1530 vendored Django 6.1 `template_tests`, routed through the oxide
+  backend. They need Django 6.1; on Django 6.0, run the suite with
+  `--ignore=tests/django_template_tests`.
 
-```sh
-cargo test
-```
+3079 pass and 2 are skipped: a case-insensitive file system guard in
+`test_loaders`, and an i18n compilation test that depends on the
+environment and fails the same way without oxide on Python 3.14.
+There are 302 Rust unit tests.
 
 ## Bench
 
@@ -42,6 +49,19 @@ uv run --no-sync python benches/bench.py
 `django-rusty-templates` is a `dev` dependency (pulled from git) for
 the head-to-head comparison. See `benches/README.md` for what the
 workloads measure.
+
+## Docs
+
+The documentation site is built with [Zensical](https://zensical.org)
+from the Markdown files in `docs/`, using the settings in `mkdocs.yml`.
+
+```sh
+uv run --only-group docs zensical serve   # preview at http://localhost:8000
+uv run --only-group docs zensical build   # write the site to site/
+```
+
+`--only-group` installs just the docs tools, so building the docs does
+not rebuild the Rust extension.
 
 ## Project layout
 
@@ -55,9 +75,12 @@ src/                      Rust crate (the engine)
   context.rs              Context + BaseContext + Value
   variable.rs             Variable lookup + FilterExpression
   errors.rs               TemplateError + PyErr round-trip
-  filters/                Built-in filters (all 57 from defaultfilters)
+  utils.rs                SafeString and HTML escaping
+  filters/                Built-in filters
+    mod.rs                Rust fast paths for Django's defaultfilters; other inputs go to Django's own functions
+    date_format.rs        {{ value|date }} formatting and translated month and day names
   tags/                   Built-in tags
-    mod.rs                Tag registry + shared helpers
+    mod.rs                Tag registry, shared helpers, and the smaller tags ({% if %}, {% with %}, {% cycle %}, ...)
     for_tag.rs            {% for %}
     url_tag.rs            {% url %}
     cache_tag.rs          {% cache %}
@@ -80,18 +103,21 @@ python/django_template_oxide/
 
 tests/
   test_regressions.py        Bug-driven regression suite
-  test_compliance.py         Django 6.0 behavioral compliance
+  test_compliance.py         Django behavioral compliance
   test_basic_rendering.py    Smoke tests
   test_oxide_backend.py      Tests via the OxideTemplates backend path
   test_parity.py             Stock-Django parity for rendering entrypoints,
                              context, filters, CSRF, lexer detection, etc.
-  django_template_tests/     Vendored Django template_tests (1514 tests)
+  test_django_parity_matrix.py  Every built-in filter, lookup, tag, and
+                             localization case through stock Django and oxide
+  i18n/                      Vendored Django i18n tests
+  django_template_tests/     Vendored Django 6.1 template_tests (1530 tests)
 
 benches/
   bench.py                Comparison bench (oxide vs rusty vs stock)
   perf_drill.py           Micro-profiler for hot-spot work
 
-docs/                     mkdocs site source
+docs/                     Documentation site source (built with Zensical)
 scripts/                  Tooling (Django test sync, etc.)
 ```
 
@@ -110,15 +136,16 @@ scripts/                  Tooling (Django test sync, etc.)
 
 - Rust: `cargo fmt` defaults. `cargo clippy -- -D warnings` clean.
 - Python: ruff defaults (line length 88).
-- Comments: explain why, not what. Cite Django source line numbers
-  when porting behavior so future readers can verify.
+- No code comments or docstrings. Explain non-obvious decisions in
+  the commit message, and delete existing comments in code you change.
 - No em-dashes in any new prose.
 - No emojis unless something is being used as data (e.g. a status
   glyph in CLI output).
 
 ## Adding a tag
 
-The pattern after the section 5 refactor is one tag per file:
+Small tags live in `src/tags/mod.rs`. A larger tag gets its own file
+under `src/tags/`, like `for_tag.rs` or `url_tag.rs`:
 
 1. Create `src/tags/your_tag.rs`.
 2. Define your `Node` struct with `token_field: Option<Token>` and
@@ -127,9 +154,10 @@ The pattern after the section 5 refactor is one tag per file:
 4. Define `pub fn compile_your_tag(parser, token) -> Result<Box<dyn Node>>`.
 5. In `src/tags/mod.rs`: `pub mod your_tag;`, `pub(crate) use your_tag::{...};`,
    and add `("your_tag", compile_your_tag)` to `register_default_tags`.
-6. Add a test in `tests/test_regressions.py` or `tests/test_compliance.py`
-   that renders the same template through stock Django and oxide and
-   asserts byte-equal output.
+6. Add cases to `TAG_CASES` in `tests/test_django_parity_matrix.py`,
+   which renders each template through stock Django and oxide and
+   requires the same output, exception type, and (in
+   `test_error_messages_match_django`) the same error message.
 
 ## Reporting bugs
 

@@ -17,8 +17,11 @@ unchanged.
   including django-cotton.
 
 Behavioral compliance verified against Django's own
-`tests/template_tests/` suite: 1513 of 1514 tests pass on Django 6.0
-(1 skipped on case-insensitive filesystems, 0 failures).
+`tests/template_tests/` suite: 1529 of 1530 tests pass on Django 6.1
+(1 skipped on case-insensitive filesystems, 0 failures). A parity
+suite also renders every built-in filter, tag, lookup, and
+localization case through stock Django and oxide and requires the
+same output, exceptions, and error messages.
 
 ## What it's not
 
@@ -32,11 +35,11 @@ Behavioral compliance verified against Django's own
 
 | Workload                | Oxide    | django-rusty-templates | Stock Django |
 |-------------------------|----------|------------------------|--------------|
-| TEXT ONLY               | 0.005ms  | 0.011ms                | 0.019ms      |
-| VARS ONLY (3 attrs)     | 0.019ms  | 0.159ms                | 0.296ms      |
-| FULL TEMPLATE           | 0.104ms  | 0.836ms                | 1.513ms      |
-| INHERITANCE             | 0.037ms  | unsupported            | 0.344ms      |
-| Compile LARGE (500 rows)| 6.93ms   | 349.05ms               | 49.38ms      |
+| TEXT ONLY               | 0.003ms  | 0.003ms                | 0.010ms      |
+| VARS ONLY (3 attrs)     | 0.010ms  | 0.063ms                | 0.161ms      |
+| FULL TEMPLATE           | 0.044ms  | 0.381ms                | 0.805ms      |
+| INHERITANCE             | 0.021ms  | unsupported            | 0.187ms      |
+| Compile LARGE (500 rows)| 3.74ms   | 166.98ms               | 23.04ms      |
 
 See [Performance](performance.md) for the full benchmark and how to
 reproduce it.

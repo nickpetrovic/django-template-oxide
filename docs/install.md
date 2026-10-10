@@ -2,13 +2,16 @@
 
 ## From PyPI
 
-Once the first release ships:
-
 ```sh
 pip install django-template-oxide
 ```
 
-## From source (current state)
+Wheels are published for Linux (x86_64 and arm64) and macOS (Apple
+Silicon), for both the regular and free-threaded (3.14t) builds of
+CPython 3.14. On other platforms pip builds from the source
+distribution, which needs a Rust toolchain.
+
+## From source
 
 ```sh
 git clone https://github.com/nickpetrovic/django-template-oxide.git
@@ -22,9 +25,9 @@ after any change to the Rust source.
 
 ## Requirements
 
-- Python 3.10 or newer
-- Django 4.2 or newer
-- Rust 1.85+ (only when building from source)
+- Python 3.14 or newer
+- Django 6.0 or newer
+- Rust 1.88+ (only when building from source)
 
 ## Verifying
 

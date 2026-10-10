@@ -5,10 +5,10 @@ build-backend = "maturin"
 [project]
 name = "django-template-oxide"
 description = "A Rust implementation of Django's template engine."
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["django>=4.2"]
+dependencies = ["django>=6.0"]
 # Version is read from Cargo.toml by maturin so we have a single source
 # of truth. Python users see it via `importlib.metadata.version(...)`.
 dynamic = ["version"]
@@ -18,19 +18,11 @@ keywords = ["django", "template", "rust", "performance"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Framework :: Django",
-  "Framework :: Django :: 4.2",
-  "Framework :: Django :: 5.0",
-  "Framework :: Django :: 5.1",
-  "Framework :: Django :: 5.2",
   "Framework :: Django :: 6.0",
   "License :: OSI Approved :: MIT License",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Rust",
@@ -63,6 +55,5 @@ dev = [
   "django-rusty-templates @ git+https://github.com/LilyFirefly/django-rusty-templates.git",
 ]
 docs = [
-  "mkdocs>=1.6",
-  "mkdocs-material>=9.5",
+  "zensical>=0.0.69,<0.1",
 ]

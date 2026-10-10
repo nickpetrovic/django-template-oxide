@@ -25,21 +25,21 @@ Tags that need access to internal parser state should use the same
 `parser.compile_filter`, `token.split_contents`, `parser.parse`
 methods that stock Django tags use. We mirror that API.
 
-## Performance gap on COMPILE SMALL
+## Compiling small templates is no faster than rusty
 
-Oxide pays a small overhead per compile vs stock Django on very
-small templates (sub-200 nodes). The overhead comes from going
-through Django's Python `Lexer.tokenize` to honor third-party
-monkey patches (django-cotton's source preprocessing pattern).
+On a template of about 120 nodes, oxide and django-rusty-templates
+compile in the same time (0.087 ms and 0.088 ms). Oxide tokenizes
+through Django's Python `Lexer.tokenize` so that third-party
+libraries which patch it, such as django-cotton, keep working, and
+on a template that small that cost is a large share of the total.
 
-The trade is intentional: shipping a Rust-native lexer fast path
-broke Cotton-using projects in production. Cotton patches at
-`AppConfig.ready` time, before our first compile; we can't
-distinguish "stock Django" from "cotton-patched" by identity.
+The trade is intentional: a Rust-native lexer broke projects that
+use Cotton. Cotton patches the lexer when its app loads, before the
+first compile, so oxide cannot tell a stock lexer from a patched one.
 
-For large templates the overhead is amortized and oxide still wins
-comfortably: at 1000 items the FULL TEMPLATE renders ~8x faster than
-rusty and ~15x faster than stock.
+On larger templates the cost is spread out: compiling 500 rows takes
+3.74 ms in oxide against 166.98 ms in rusty and 23.04 ms in stock
+Django.
 
 ## Templates compiled once, cached forever
 
@@ -53,10 +53,9 @@ is fine (templates don't change). In dev with autoreload it means
 template edits don't take effect until process restart. A
 `clear_template_caches()` function will land before 1.0.
 
-## Free-threaded Python (3.13t / 3.14t)
+## Free-threaded Python (3.14t)
 
-The extension targets the standard GIL build and is not yet validated
-against free-threaded (no-GIL) Python. The engine is GIL-bound today (it
-holds the GIL across a render via `Python::attach`) and uses thread-local
-caches, so it is thread-safe under the GIL but does not advertise
-`gil_used = false`. Free-threaded support is a post-1.0 consideration.
+Importing the extension on a free-threaded build leaves the GIL
+disabled, and the development test suite and benchmarks run on
+CPython 3.14t. Per-render caches are thread-local and shared caches
+are behind locks.

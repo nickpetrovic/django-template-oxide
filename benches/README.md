@@ -74,13 +74,13 @@ worth knowing about.
 
 The FULL TEMPLATE rendered at items ∈ {1, 10, 100, 1000}. Reports
 `ns/item` for the oxide column so you can see per-row cost across
-input sizes. Oxide stabilizes at ~2000 ns/item from N=100 upward;
-stock Django degrades superlinearly past N=1000.
+input sizes. Oxide settles at about 800 ns per row from N=100 upward.
 
 ## Methodology
 
-- **Hardware**: M-series MacBook (whatever the current dev machine
-  is). Numbers will differ on Linux x86_64; ratios should not.
+- **Hardware**: the published numbers come from the machine listed in
+  [docs/performance.md](../docs/performance.md). Numbers will differ
+  on other machines, such as Linux x86_64; the ratios should not.
 - **Warmup**: each case runs once before the timer starts, so JIT,
   module imports, and class lookup caches are warm.
 - **Iterations**: 200 by default. Override with `BENCH_ITERS=N`.
