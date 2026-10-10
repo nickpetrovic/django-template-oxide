@@ -132,6 +132,34 @@ scripts/                  Tooling (Django test sync, etc.)
    in the commit message.
 5. Update CHANGELOG.md under `Unreleased`.
 
+## Releasing
+
+Nothing publishes automatically. Pushing commits or tags does not run
+any workflow; a release only happens when you start the Release
+workflow by hand.
+
+1. Set the new version in `Cargo.toml`.
+2. In `CHANGELOG.md`, rename `## Unreleased` to `## X.Y.Z (YYYY-MM-DD)`
+   and add an empty `## Unreleased` above it.
+3. Commit, then tag the commit and push the tag:
+
+   ```sh
+   git tag -a vX.Y.Z -m "X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+4. Start the release on that tag, either from the Actions tab (Release,
+   Run workflow, pick the tag) or with:
+
+   ```sh
+   gh workflow run release.yml --ref vX.Y.Z
+   ```
+
+The workflow checks that the tag matches `Cargo.toml`, runs the tests on
+CPython 3.14 and 3.14t against Django 6.0 and 6.1, builds the wheels and
+the source distribution, publishes them to PyPI, and creates a GitHub
+Release with the matching `CHANGELOG.md` section as its notes.
+
 ## Code style
 
 - Rust: `cargo fmt` defaults. `cargo clippy -- -D warnings` clean.
