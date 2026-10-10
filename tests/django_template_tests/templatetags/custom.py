@@ -8,15 +8,6 @@ from django.utils.safestring import mark_safe
 register = template.Library()
 
 
-# `{% inner_template_render %}`: Cotton-style "render a separate
-# template mid-render" pattern. Models django-cotton's `{% c-foo %}`
-# which loads `cotton/foo.html` via `get_template(...)` and calls
-# `.render(context)` during its own render, i.e. a recursive call into
-# `Template.render`. If the outer BlockContext gets wiped by the nested
-# render, the outer `{% block %}` renders its empty default and the
-# child override is silently dropped.
-
-
 class _InnerTemplateRenderNode(template.Node):
     def render(self, context):
         t = get_template("oxide_fragment.html")
@@ -60,8 +51,6 @@ def noop(value, param=None):
 
 @register.filter
 def get_item(mapping, key):
-    """``mapping.get(key)`` as a filter. Verifies filter arguments that
-    traverse dotted lookups (e.g. ``dict|get_item:obj.id``) resolve."""
     if mapping is None:
         return None
     return mapping.get(key)
@@ -295,62 +284,6 @@ def simple_unlimited_args_kwargs_block(content, one, two="hi", *args, **kwargs):
             ", ".join("%s=%s" % (k, v) for (k, v) in kwargs.items()),
         )
     )
-
-
-@register.simple_block_tag(takes_context=True)
-def simple_block_tag_without_context_parameter(arg):
-    """Expected simple_block_tag_without_context_parameter __doc__"""
-    return "Expected result"
-
-
-@register.simple_block_tag
-def simple_tag_without_content_parameter(arg):
-    """Expected simple_tag_without_content_parameter __doc__"""
-    return "Expected result"
-
-
-@register.simple_block_tag(takes_context=True)
-def simple_tag_with_context_without_content_parameter(context, arg):
-    """Expected simple_tag_with_context_without_content_parameter __doc__"""
-    return "Expected result"
-
-
-@register.simple_tag(takes_context=True)
-def simple_tag_without_context_parameter(arg):
-    """Expected simple_tag_without_context_parameter __doc__"""
-    return "Expected result"
-
-
-simple_tag_without_context_parameter.anything = (
-    "Expected simple_tag_without_context_parameter __dict__"
-)
-
-
-@register.simple_block_tag(takes_context=True)
-def simple_tag_takes_context_without_params_block():
-    """Expected simple_tag_takes_context_without_params_block __doc__"""
-    return "Expected result"
-
-
-@register.simple_tag(takes_context=True)
-def simple_tag_takes_context_without_params():
-    """Expected simple_tag_takes_context_without_params __doc__"""
-    return "Expected result"
-
-
-simple_tag_takes_context_without_params.anything = (
-    "Expected simple_tag_takes_context_without_params __dict__"
-)
-
-
-@register.simple_block_tag
-def simple_block_tag_without_content():
-    return "Expected result"
-
-
-@register.simple_block_tag(takes_context=True)
-def simple_block_tag_with_context_without_content():
-    return "Expected result"
 
 
 @register.simple_tag(takes_context=True)

@@ -1,7 +1,9 @@
+from django.template import Engine
 from django.template.base import Origin, Template, TemplateSyntaxError
 from django.template.context import Context
 from django.template.loader_tags import BlockContext, BlockNode
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, ignore_warnings
+from django.utils.deprecation import RemovedInDjango2028Warning
 from django.views.debug import ExceptionReporter
 
 from ..utils import SilentAttrClass, SilentGetItemClass, SomeClass, setup
@@ -393,6 +395,45 @@ class BasicSyntaxTests(SimpleTestCase):
         output = self.engine.render_to_string("template", {"meals": Meals})
         self.assertEqual(output, "soup is yummy.")
 
+    def test_double_dot_lookup(self):
+        loaders = [
+            (
+                "django.template.loaders.cached.Loader",
+                [
+                    (
+                        "django.template.loaders.locmem.Loader",
+                        {"template": "{{ doubledot..lookup }}"},
+                    ),
+                ],
+            ),
+        ]
+
+        msg = (
+            "Support for double-dot lookups '..' which maps to a lookup of the empty "
+            "string is deprecated.\n  Template: template\n  Line: 1"
+        )
+
+        for debug in [True, False]:
+            with self.subTest(debug=debug):
+                engine = Engine(loaders=loaders, debug=debug)
+                with self.assertWarnsMessage(RemovedInDjango2028Warning, msg):
+                    engine.render_to_string("template", {})
+                engine.render_to_string("template", {})
+
+    def test_double_dot_in_literal(self):
+        tests = [
+            ('{{ "hello..world" }}', "hello..world"),
+            ("{{ 'a..b'|upper }}", "A..B"),
+            ('{{ missing|default:"a..b" }}', "a..b"),
+            ('{{ _("a..b") }}', "a..b"),
+        ]
+        engine = Engine()
+        for template_string, expected in tests:
+            with self.subTest(template_string=template_string):
+                template = engine.from_string(template_string)
+                output = template.render(Context({}))
+                self.assertEqual(output, expected)
+
 
 class BlockContextTests(SimpleTestCase):
     def test_repr(self):
@@ -429,3 +470,11 @@ class TemplateNameInExceptionTests(SimpleTestCase):
             Template("{% endfor %}")
         except TemplateSyntaxError as e:
             self.assertEqual(str(e), self.template_error_msg)
+
+
+@ignore_warnings(category=RemovedInDjango2028Warning)
+class DeprecatedTests(SimpleTestCase):
+    @setup({"template": "{{ doubledot..lookup }}"})
+    def test_double_dot_lookup(self):
+        context = Context({"doubledot": {"": {"lookup": "value"}}})
+        self.assertEqual(self.engine.render_to_string("template", context), "value")

@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-DEFAULT_TAG = "6.0"
+DEFAULT_TAG = "6.1"
 CACHE_ROOT = Path.home() / ".cache" / "django-template-oxide"
 
 
