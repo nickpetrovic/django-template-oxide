@@ -28,7 +28,7 @@ methods that stock Django tags use. We mirror that API.
 ## Compiling small templates is no faster than rusty
 
 On a template of about 120 nodes, oxide and django-rusty-templates
-compile in the same time (0.087 ms and 0.088 ms). Oxide tokenizes
+compile in the same time (88.1 µs and 88.9 µs). Oxide tokenizes
 through Django's Python `Lexer.tokenize` so that third-party
 libraries which patch it, such as django-cotton, keep working, and
 on a template that small that cost is a large share of the total.
@@ -38,7 +38,7 @@ use Cotton. Cotton patches the lexer when its app loads, before the
 first compile, so oxide cannot tell a stock lexer from a patched one.
 
 On larger templates the cost is spread out: compiling 500 rows takes
-3.74 ms in oxide against 166.98 ms in rusty and 23.04 ms in stock
+4.01 ms in oxide against 169.5 ms in rusty and 24.7 ms in stock
 Django.
 
 ## Templates compiled once, cached forever
@@ -59,3 +59,15 @@ Importing the extension on a free-threaded build leaves the GIL
 disabled, and the development test suite and benchmarks run on
 CPython 3.14t. Per-render caches are thread-local and shared caches
 are behind locks.
+
+Rendering does not yet get much faster with more threads. In the
+benchmark, oxide rendered about 22,000 pages per second on one thread,
+30,000 on four, and 22,000 on eight, where an ideal result would grow
+with the thread count. The same happens when every thread has its own
+template and data, while a template that only prints a number does
+speed up with more threads, so the cause is likely contention on some
+object or lock that every full render touches. It has not been found
+yet. Each thread still renders many times faster than stock Django, so
+running on the free-threaded build is safe; it just does not yet use
+the extra cores well. The numbers are in
+[Performance](performance.md#rendering-from-several-threads).

@@ -1,147 +1,127 @@
 # Benchmarks
 
-Three things live here:
-
-- `bench.py`, the comparison bench (oxide vs `django-rusty-templates`
-  vs stock Django). What you run to get the headline numbers.
-- `perf_drill.py`, a focused micro-profiler for digging into hot
-  spots. Used during perf work to find what's slow.
-- This README, methodology, how to reproduce, what each workload
-  measures.
+`bench.py` compares oxide with `django-rusty-templates` ("rusty") and
+stock Django on the same templates and data, checks that each engine's
+output matches stock Django, and prints the results as tables with a
+plain-language summary.
 
 ## Running it
 
 ```sh
 uv sync --group dev
+uvx maturin develop --release
 uv run --no-sync python benches/bench.py
 ```
 
-`django-rusty-templates` ships in the `dev` group, so the first
-`uv sync` builds it from its upstream repo (not on PyPI). Subsequent
-runs reuse the cached wheel.
+`django-rusty-templates` and `django-cotton` are in the `dev` group. The
+first `uv sync` builds rusty from its repository, since it is not on
+PyPI.
 
-## What's measured
+A full run takes about a minute. Useful options:
 
-### Section 1: render workloads
+| Option | What it does |
+|--------|--------------|
+| `--quick` | Fewer and shorter samples, for a fast look (about 20 seconds) |
+| `--sections render,compile` | Run only some sections (see the list below) |
+| `--only "date"` | Run only workloads whose name contains the text; repeatable |
+| `--items 200` | Rows of data per template (default 50) |
+| `--json results.json` | Also save every sample to a JSON file |
+| `--profile` | Show where oxide spends time in each workload (needs a profiler build) |
+| `--no-color` | Plain output, for logs |
 
-22 distinct cases, each a small Django template rendered against a
-synthetic dataset of 50 Application-shaped objects. Each backend
-renders the same template the same number of times (default: 200);
-we report mean per-render time and the p99 latency tail.
+## Comparing two runs
 
-| Case | What it exercises |
-|------|-------------------|
-| TEXT ONLY | for-loop iteration overhead with no variables |
-| VARS ONLY | 3 attribute lookups per row, no filters |
-| FULL TEMPLATE | realistic mix: filters, conditionals, 6 columns |
-| DEEP LOOKUP | `a.b.c.d.e.f` attribute chain (Variable._resolve_lookup) |
-| DICT LOOKUP | 3 dict key reads per row |
-| LIST INDEXING | `items.0` integer-keyed lookup |
-| FILTER CHAIN | 6-deep filter pipeline (`upper\|lower\|title\|...`) |
-| DATE FILTERS | 3 `date` filter invocations per row |
-| IF/ELIF CHAIN | 5-branch smartif chain |
-| WITH NESTED | 4 nested `{% with %}` blocks |
-| FORLOOP COUNTER | `forloop.counter` / `.first` / `.last` access |
-| CYCLE TAG | `{% cycle %}` with render_context state |
-| AUTOESCAPE HEAVY | HTML metachars in half the rows |
-| URL TAG | `{% url 'name' arg %}` reverse per row |
-| CSRF TOKEN | `{% csrf_token %}` per row |
-| FOR EMPTY | `{% for %}{% empty %}` on an empty list |
-| SPACELESS BLOCK | `{% spaceless %}` whitespace stripping |
-| CUSTOM PY FILTER | `@register.filter` Python call-out |
-| CUSTOM PY simple_tag | `@register.simple_tag` dispatch |
-| CUSTOM PY @register.tag | raw `@register.tag` (PyOpaqueNode path) |
-| INCLUDE LOOP | `{% include 'fragment.html' %}` in a 50-row loop |
-| INHERITANCE | `{% extends %}` + 3 block overrides |
-
-### Section 2: compile time
-
-How fast each engine turns a source string into a compiled template.
-Three sizes:
-
-| Size | Rows | Approx node count |
-|------|------|--------------------|
-| SMALL  | 10  | 120 |
-| MEDIUM | 100 | 1200 |
-| LARGE  | 500 | 6000 |
-
-This isolates lex+parse from render. Templates are typically
-compile-once-render-many in production, so compile time matters
-less than render time, but a 50x gap (oxide vs rusty on LARGE) is
-worth knowing about.
-
-### Section 3: scaling sweep
-
-The FULL TEMPLATE rendered at items ∈ {1, 10, 100, 1000}. Reports
-`ns/item` for the oxide column so you can see per-row cost across
-input sizes. Oxide settles at about 800 ns per row from N=100 upward.
-
-## Methodology
-
-- **Hardware**: the published numbers come from the machine listed in
-  [docs/performance.md](../docs/performance.md). Numbers will differ
-  on other machines, such as Linux x86_64; the ratios should not.
-- **Warmup**: each case runs once before the timer starts, so JIT,
-  module imports, and class lookup caches are warm.
-- **Iterations**: 200 by default. Override with `BENCH_ITERS=N`.
-- **Reported metric**: mean per-render time in ms. Also the p99
-  (single slowest of N renders), that's the parenthetical column
-  in the output. A high p99/mean ratio indicates the worst case is
-  hitting GC pauses or dict resizes.
-- **Correctness**: each backend's output is verified against stock
-  Django; a divergent result is shown as `ERROR: wrong output` rather
-  than timed (a wrong result is not a faster one -- e.g. rusty silently
-  drops the `{% empty %}` block). When a backend can't run a case at
-  all (rusty bails on `WITH`, `CYCLE`, custom tags, etc.), we print
-  `ERROR: <reason>` inline so the comparison stays compact.
-
-## Environment knobs
-
-| Variable | Default | What it does |
-|----------|---------|--------------|
-| `BENCH_ITEMS` | 50 | Synthetic dataset size |
-| `BENCH_ITERS` | 200 | Iterations per case |
-| `BENCH_SECTIONS` | `render,compile,scaling` | Comma-separated subset |
-
-Examples:
+Save a run before and after a change, then compare them:
 
 ```sh
-# Only run compile-time benchmarks
-BENCH_SECTIONS=compile uv run --no-sync python benches/bench.py
-
-# Stress test with 5000 rows, 50 iters
-BENCH_ITEMS=5000 BENCH_ITERS=50 uv run --no-sync python benches/bench.py
+uv run --no-sync python benches/bench.py --json before.json
+# make the change, rebuild
+uv run --no-sync python benches/bench.py --json after.json
+uv run --no-sync python benches/bench.py compare before.json after.json
 ```
 
-## perf_drill.py
+`compare` lists oxide's time for each workload in both runs, marks each
+one faster, slower, or the same (within measurement noise), and exits
+with status 1 if any workload got slower. It warns when the two runs
+come from different machines.
 
-A focused micro-profiler for hot-spot work. Targets the cases where
-oxide is slowest relative to rusty (the headline cases used to be
-FOR EMPTY, FORLOOP COUNTER, COMPILE SMALL, those have since been
-optimized). Times each case at 5000 iters for stable numbers, then
-dumps the per-zone breakdown from oxide's internal profiler.
+## Profiling
 
-Requires building with the `prof` cargo feature:
+`--profile` adds a table after each workload showing oxide's internal
+timing zones. It needs oxide built with the `prof` feature, which adds
+some overhead, so profiler builds should not be used for published
+numbers:
 
 ```sh
-uvx maturin develop --release --features=prof
-uv run --no-sync python benches/perf_drill.py
+VIRTUAL_ENV=.venv uvx maturin develop --release --features prof
+uv run --no-sync python benches/bench.py --profile --sections render --only "full table"
+uvx maturin develop --release
 ```
 
-The `prof` feature has measurable overhead (~5% on hot paths); it's
-not enabled in default release builds.
+## Sections
 
-## What the numbers don't tell you
+| Section | What it measures |
+|---------|------------------|
+| `render` | 30 template features (lookups, filters, tags, includes, inheritance, custom tags) over 50 rows of plain Python objects |
+| `django` | Django model instances, foreign keys, a QuerySet queried during the render, lazy translation strings, and a form with errors |
+| `pages` | Whole pages through `get_template` and a request: the Django admin login and index pages, and a django-cotton page |
+| `compile` | Compiling templates of 120, 1,200, and 6,000 nodes from source, with no cache |
+| `loading` | `get_template` plus render the way views do it, with the cached loader and with no cache |
+| `scaling` | The full table template at 1, 10, 100, and 1,000 rows |
+| `context` | Passing a plain dict, a Django `Context` object, and a dict with 200 extra keys |
+| `threads` | Renders per second from 1, 2, 4, and 8 threads sharing one compiled template |
+| `memory` | Extra peak memory of a fresh process while compiling the large template and rendering 1,000 rows |
 
-- **Cold start.** First render after process start includes Django
-  setup, oxide import, module-cache population. We measure warm
-  steady-state.
-- **Memory pressure.** Bench renders into pre-allocated buffers
-  where possible. A 5 MB output template in a tight memory budget
-  will exercise allocators differently.
-- **Concurrent rendering.** Single-threaded measurements. Multi-
-  threaded throughput depends on Django middleware and ASGI/WSGI
-  worker config more than the template engine.
-- **Compilation cache hit rate.** The numbers above assume warm
-  template cache. Dev mode with autoreload sees more compile
-  pressure and oxide's compile advantage matters more.
+The django-cotton page and the memory measurements run in separate
+processes. django-cotton patches Django's template lexer when it loads,
+which would change the compile numbers for every other workload, and
+peak memory is only meaningful in a fresh process.
+
+## How the numbers are collected
+
+- **Samples.** Each engine first works out how many renders take at
+  least 10 ms (3 ms with `--quick`), then the bench takes 9 samples of
+  that many renders (5 with `--quick`). The reported time is the median
+  sample divided by the number of renders, so even sub-microsecond
+  workloads are timed accurately.
+- **Fairness.** Engines alternate sample by sample and the starting
+  engine rotates, so a change in machine load affects all of them
+  equally. Garbage is collected before every sample.
+- **Noise.** The spread between samples (standard deviation over mean)
+  is kept for every result. Tables mark a result with a yellow ± when
+  its samples varied by 5% or more, and a comparison is reported as
+  "same" when the difference is within the two results' combined
+  spread, with a minimum of 3%.
+- **Correctness.** Each engine's output is compared with stock Django's
+  before timing. A different output is reported as "wrong output"
+  instead of a time, and an engine that cannot run a workload shows the
+  reason, such as "not supported" or "syntax error". CSRF token values,
+  which change on every render, are ignored in the comparison.
+- **Summary.** The summary gives the geometric mean of oxide's speedup
+  over the workloads both engines can run, and counts the workloads
+  each engine could not run.
+
+## Interpreter builds
+
+Results differ between the regular CPython build and the free-threaded
+build (3.14t), and the threads section only shows parallel speedups on
+the free-threaded build. To measure the regular build alongside the
+free-threaded development environment, use a second environment:
+
+```sh
+UV_PROJECT_ENVIRONMENT=.venv-gil uv sync --python 3.14+gil --group dev
+VIRTUAL_ENV=.venv-gil uvx maturin develop --release
+.venv-gil/bin/python benches/bench.py
+```
+
+## Files
+
+| File | Contents |
+|------|----------|
+| `bench.py` | Command line, sections, and the separate-process workers |
+| `cases.py` | Templates, test data, and Django objects |
+| `harness.py` | Timing, output checks, and thread throughput |
+| `report.py` | Tables, the summary, JSON output, and `compare` |
+| `setup_env.py` | Django settings and the three engines |
+| `bench_tags.py`, `bench_urls.py` | The custom tag library and URLconf the templates use |
+| `templates/` | Templates loaded by name, including the django-cotton components |

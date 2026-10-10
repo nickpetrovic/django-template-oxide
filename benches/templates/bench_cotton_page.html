@@ -1,0 +1,8 @@
+<c-layout title="Applications">
+  {% for app in applications %}
+    <c-card :title="app.candidate.name" :status="app.status" data-id="{{ app.id }}">
+      <p>{{ app.posting.title }} at {{ app.posting.company.name }}</p>
+      <c-badge :label="app.stage.name" tone="info" />
+    </c-card>
+  {% endfor %}
+</c-layout>

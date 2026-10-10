@@ -1,0 +1,1 @@
+{% extends "bench_base.html" %}{% block title %}Apps ({{ applications|length }}){% endblock %}{% block header %}<h1>Applications</h1>{% endblock %}{% block content %}<table>{% for app in applications %}<tr><td>{{ app.candidate.name }}</td><td>{{ app.status }}</td></tr>{% endfor %}</table>{% endblock %}

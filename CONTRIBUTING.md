@@ -43,12 +43,24 @@ There are 302 Rust unit tests.
 
 ```sh
 uv sync --group dev
+uvx maturin develop --release
 uv run --no-sync python benches/bench.py
 ```
 
-`django-rusty-templates` is a `dev` dependency (pulled from git) for
-the head-to-head comparison. See `benches/README.md` for what the
-workloads measure.
+`django-rusty-templates` (pulled from git) and `django-cotton` are
+`dev` dependencies for the comparison. To check a change for
+regressions, save a run before and after it and compare them:
+
+```sh
+uv run --no-sync python benches/bench.py --json before.json
+uv run --no-sync python benches/bench.py --json after.json
+uv run --no-sync python benches/bench.py compare before.json after.json
+```
+
+`compare` exits with status 1 if any workload got slower. See
+`benches/README.md` for every option, what the workloads measure, and
+how to measure the regular CPython build in a second environment
+(`.venv-gil`) alongside the free-threaded one.
 
 ## Docs
 
@@ -114,8 +126,14 @@ tests/
   django_template_tests/     Vendored Django 6.1 template_tests (1530 tests)
 
 benches/
-  bench.py                Comparison bench (oxide vs rusty vs stock)
-  perf_drill.py           Micro-profiler for hot-spot work
+  bench.py                Comparison bench (oxide vs rusty vs stock), compare command
+  cases.py                Templates, test data, and Django objects
+  harness.py              Timing, output checks, thread throughput
+  report.py               Tables, summary, JSON output
+  setup_env.py            Django settings and the three engines
+  bench_tags.py           Custom tag library used by the templates
+  bench_urls.py           URLconf used by the templates
+  templates/              Templates loaded by name, including django-cotton components
 
 docs/                     Documentation site source (built with Zensical)
 scripts/                  Tooling (Django test sync, etc.)

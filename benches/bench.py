@@ -1,915 +1,670 @@
-"""Comparison benchmark: oxide vs django-rusty-templates vs stock Django.
-
-Measures three axes: render workloads, cold compile time, and scaling
-across item counts. Each backend renders each case N times after one
-warmup pass; reports mean and p99 latency.
-
-If the FFI profiler is compiled in (`cargo build --features=prof`),
-an extra per-zone breakdown is printed for the FULL TEMPLATE.
-
-Run:
-
-    uv sync --group dev
-    uv run benches/bench.py
-
-Env knobs: BENCH_ITEMS, BENCH_ITERS, BENCH_SECTIONS.
-"""
-
+import argparse
 import datetime
+import importlib.metadata
+import json
 import os
-import time
+import platform
+import resource
+import subprocess
+import sys
+import sysconfig
+from pathlib import Path
 
 import django
-from django.conf import settings
-
-
-# Synthesised modules are registered as top-level (not under `benches.`)
-# because rusty's backend init eagerly imports `libraries` by name, and
-# `benches.` is not on sys.path unless invoked via `python -m benches.bench`.
-_BENCH_URLCONF = "_oxide_bench_urls"
-_BENCH_LIB_PATH = "_oxide_bench_lib"
-
-
-# Locmem template store shared by both backends. The global
-# `settings.TEMPLATES` must match the per-engine config because oxide's
-# `{% include %}` routes through `django.template.loader.get_template`
-# rather than the local engine.
-_LOCMEM_TEMPLATES = {
-    "bench_row.html": (
-        "<tr>"
-        "<td>{{ app.candidate.name }}</td>"
-        "<td>{{ app.status|title }}</td>"
-        "</tr>"
-    ),
-    "bench_base.html": (
-        "<html>"
-        "<head><title>{% block title %}default-title{% endblock %}</title></head>"
-        "<body>"
-        "{% block header %}<h1>default-header</h1>{% endblock %}"
-        "<main>{% block content %}default-content{% endblock %}</main>"
-        "</body></html>"
-    ),
-    "bench_child.html": (
-        '{% extends "bench_base.html" %}'
-        "{% block title %}Apps ({{ applications|length }}){% endblock %}"
-        "{% block header %}<h1>Applications</h1>{% endblock %}"
-        "{% block content %}"
-        "<table>"
-        "{% for app in applications %}"
-        "<tr><td>{{ app.candidate.name }}</td><td>{{ app.status }}</td></tr>"
-        "{% endfor %}"
-        "</table>"
-        "{% endblock %}"
-    ),
-    # 3-level chain (grandchild -> child -> base) exercising block.super.
-    "bench_grandchild.html": (
-        '{% extends "bench_child.html" %}'
-        "{% block title %}GC: {{ block.super }}{% endblock %}"
-        "{% block header %}{{ block.super }}<nav>menu</nav>{% endblock %}"
-    ),
-}
-
-
-_TEMPLATES_OPTIONS = {
-    "context_processors": [],
-    "builtins": [
-        "django.template.defaulttags",
-        "django.template.defaultfilters",
-        "django.template.loader_tags",
-    ],
-    "libraries": {
-        "bench": _BENCH_LIB_PATH,
-    },
-    "loaders": [
-        ("django.template.loaders.locmem.Loader", _LOCMEM_TEMPLATES),
-    ],
-}
-
-
-if not settings.configured:
-    settings.configure(
-        DEBUG=False,
-        INSTALLED_APPS=[],
-        # TEMPLATES is populated so oxide's {% include %} (which routes
-        # through `django.template.loader.get_template`) sees the same
-        # locmem dict as direct `.get_template` calls.
-        TEMPLATES=[
-            {
-                "BACKEND": "django.template.backends.django.DjangoTemplates",
-                "DIRS": [],
-                "APP_DIRS": False,
-                "OPTIONS": _TEMPLATES_OPTIONS,
-            },
-        ],
-        USE_TZ=True,
-        USE_I18N=True,
-        LANGUAGE_CODE="en-us",
-        ROOT_URLCONF=_BENCH_URLCONF,
-        SECRET_KEY="bench-not-a-secret",
-        ALLOWED_HOSTS=["*"],
-    )
-    django.setup()
-
-
-# Synthesise a urlconf so `{% url 'detail' app.id %}` resolves without
-# a real project on the path.
-import sys
-import types
-
-if _BENCH_URLCONF not in sys.modules:
-    from django.urls import path
-    from django.http import HttpResponse
-
-    def _dummy_view(request, pk):  # pragma: no cover
-        return HttpResponse("")
-
-    _mod = types.ModuleType(_BENCH_URLCONF)
-    _mod.urlpatterns = [
-        path("apps/<int:pk>/", _dummy_view, name="detail"),
-    ]
-    sys.modules[_BENCH_URLCONF] = _mod
-
-
-from django import template  # noqa: E402
-from django.template.backends.django import DjangoTemplates  # noqa: E402
-
-from django_template_oxide.backend import OxideTemplates  # noqa: E402
-
-
-from django_rusty_templates import RustyTemplates as _RustyTemplates  # noqa: E402
-
-
-# Optional native profiler, compiled in via `cargo build --features=prof`.
-try:
-    from django_template_oxide._rust import get_prof_stats, reset_prof_stats
-except ImportError:
-
-    def get_prof_stats():
-        return {}
-
-    def reset_prof_stats():
-        pass
-
-
-# Custom Python tag + filter for the FFI-cost bench cases. Kept trivial
-# so any backend cost difference reflects FFI overhead, not user code.
-
-
-_bench_register = template.Library()
-
-
-@_bench_register.filter
-def bench_noop(value, _arg=None):
-    """No-op filter. Measures Python-filter call-out overhead per row."""
-    return value
-
-
-@_bench_register.simple_tag
-def bench_simple_tag(value):
-    """Trivial simple_tag. Measures the simple_tag dispatch path."""
-    return f"[{value}]"
-
-
-@_bench_register.tag(name="bench_raw_tag")
-def _do_bench_raw_tag(parser, token):
-    """Raw @register.tag. Measures the PyOpaqueNode dispatch path."""
-    bits = token.split_contents()
-    if len(bits) != 2:
-        raise template.TemplateSyntaxError("bench_raw_tag takes one arg")
-    var = parser.compile_filter(bits[1])
-    return _BenchRawTagNode(var)
-
-
-class _BenchRawTagNode(template.Node):
-    def __init__(self, var):
-        self.var = var
-
-    def render(self, context):
-        return f"<{self.var.resolve(context)}>"
-
-
-# Register the synthetic library module so engines can resolve it by
-# dotted name. Idempotent across repeated `run()` calls.
-if _BENCH_LIB_PATH not in sys.modules:
-    _lib_mod = types.ModuleType(_BENCH_LIB_PATH)
-    _lib_mod.register = _bench_register
-    sys.modules[_BENCH_LIB_PATH] = _lib_mod
-
-
-class _Company:
-    __slots__ = ("name",)
-
-    def __init__(self, name):
-        self.name = name
-
-
-class _Posting:
-    __slots__ = ("title", "company")
-
-    def __init__(self, title, company):
-        self.title = title
-        self.company = company
-
-
-class _Candidate:
-    __slots__ = ("name",)
-
-    def __init__(self, name):
-        self.name = name
-
-
-class _Stage:
-    __slots__ = ("name", "order")
-
-    def __init__(self, name, order):
-        self.name = name
-        self.order = order
-
-
-class _Deep:
-    """Six-level deep object for the DEEP LOOKUP bench."""
-
-    __slots__ = ("a",)
-
-    def __init__(self, value):
-        # Builds a.b.c.d.e.f -> value.
-        class _F:
-            __slots__ = ("f",)
-
-            def __init__(self, v):
-                self.f = v
-
-        class _E:
-            __slots__ = ("e",)
-
-            def __init__(self, v):
-                self.e = _F(v)
-
-        class _D:
-            __slots__ = ("d",)
-
-            def __init__(self, v):
-                self.d = _E(v)
-
-        class _C:
-            __slots__ = ("c",)
-
-            def __init__(self, v):
-                self.c = _D(v)
-
-        class _B:
-            __slots__ = ("b",)
-
-            def __init__(self, v):
-                self.b = _C(v)
-
-        self.a = _B(value)
-
-
-class _Application:
-    """Application-shaped object with the same attribute paths as a
-    Django ``Application`` model, so template lookups exercise the same
-    `getattr` chains across all three backends."""
-
-    __slots__ = (
-        "id",
-        "candidate",
-        "posting",
-        "stage",
-        "status",
-        "created_at",
-        "is_archived",
-        "rating",
-        "tags",
-        "html_blob",
-        "deep",
-        "meta",
-        "bio",
-    )
-
-    def __init__(self, i):
-        self.id = i
-        self.candidate = _Candidate(f"Candidate {i}")
-        self.posting = _Posting(
-            title=f"Posting {i % 30}",
-            company=_Company(f"Company {i % 6}"),
-        )
-        self.stage = _Stage(name=f"Stage {i % 5}", order=i % 5)
-        self.status = ("active", "rejected", "withdrawn", "hired")[i % 4]
-        self.created_at = datetime.date(2024, 1, 1) + datetime.timedelta(days=i)
-        self.is_archived = (i % 7) == 0
-        self.rating = (i % 10) - 5  # spans negative for IF CHAIN
-        self.tags = ["red", "green", "blue"][: (i % 3) + 1]
-        # HTML metachars on every other row so autoescape has real work.
-        self.html_blob = (
-            "Plain text & some content"
-            if i % 2
-            else '<script>alert("xss")</script>&copy;'
-        )
-        self.deep = _Deep(f"deep-{i}")
-        # Prose paragraph with HTML metachars, a URL, and many words/lines
-        # for long-text autoescape and string-filter throughput cases.
-        self.bio = (
-            f"Senior engineer & <designer> #{i} with 10+ years.\n"
-            'Built systems "at scale" and shipped often.\n'
-            "More at https://example.com/p?q=1&r=2 today.\n"
-        ) * 3
-        self.meta = {
-            "k1": f"v{i}-1",
-            "k2": f"v{i}-2",
-            "k3": f"v{i}-3",
-            "k4": f"v{i}-4",
-        }
-
-
-def _build_applications(count):
-    return [_Application(i) for i in range(count)]
-
-
-# Render workloads.
-
-
-_FULL_TEMPLATE = (
-    "<table><thead><tr><th>Name</th><th>Job</th><th>Company</th>"
-    "<th>Stage</th><th>Date</th><th>Status</th></tr></thead><tbody>\n"
-    "{% for app in applications %}"
-    '<tr class="row {% if app.is_archived %}archived{% else %}active{% endif %}">'
-    "<td>{{ app.candidate.name }}</td>"
-    '<td>{{ app.posting.title|default:"\u2014" }}</td>'
-    '<td>{{ app.posting.company.name|default:"\u2014" }}</td>'
-    "<td>{{ app.stage.name }}</td>"
-    '<td>{{ app.created_at|date:"M d, Y" }}</td>'
-    '<td class="status-{{ app.status }}">{{ app.status|title }}</td>'
-    "</tr>{% endfor %}</tbody></table>"
+import harness
+import report
+import setup_env
+from django.template import Context
+from django_template_oxide._rust import get_prof_stats, reset_prof_stats
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+SECTIONS = (
+    "render",
+    "django",
+    "pages",
+    "compile",
+    "loading",
+    "scaling",
+    "context",
+    "threads",
+    "memory",
 )
+MB = 1024 * 1024
 
 
-RENDER_CASES = [
-    # Loop overhead baselines.
-    (
-        "TEXT ONLY (loop, no vars)",
-        "{% for app in applications %}<tr><td>plain</td></tr>{% endfor %}",
-    ),
-    (
-        "VARS ONLY (3 attrs, no filters)",
-        (
-            "{% for app in applications %}"
-            "<tr>"
-            "<td>{{ app.candidate.name }}</td>"
-            "<td>{{ app.stage.name }}</td>"
-            "<td>{{ app.status }}</td>"
-            "</tr>{% endfor %}"
-        ),
-    ),
-    ("FULL TEMPLATE (real-world mix)", _FULL_TEMPLATE),
-    # Variable lookup shapes.
-    (
-        "DEEP LOOKUP (a.b.c.d.e.f chain)",
-        "{% for app in applications %}{{ app.deep.a.b.c.d.e.f }}{% endfor %}",
-    ),
-    (
-        "DICT LOOKUP (3 keys per row)",
-        (
-            "{% for app in applications %}"
-            "{{ app.meta.k1 }}{{ app.meta.k2 }}{{ app.meta.k3 }}"
-            "{% endfor %}"
-        ),
-    ),
-    (
-        "LIST INDEXING (tags.0)",
-        (
-            "{% for app in applications %}"
-            "{{ app.tags.0 }}"
-            "{% endfor %}"
-        ),
-    ),
-    # Filter pipelines.
-    (
-        "FILTER CHAIN (6-deep pipeline)",
-        (
-            "{% for app in applications %}"
-            "{{ app.candidate.name|upper|lower|title|truncatechars:20|default:\"x\"|safe }}"
-            "{% endfor %}"
-        ),
-    ),
-    (
-        "DATE FILTERS (3 date formats)",
-        (
-            "{% for app in applications %}"
-            '{{ app.created_at|date:"Y-m-d" }}|'
-            '{{ app.created_at|date:"M d" }}|'
-            '{{ app.created_at|date:"D" }}'
-            "{% endfor %}"
-        ),
-    ),
-    # Conditionals.
-    (
-        "IF/ELIF CHAIN (5 branches)",
-        (
-            "{% for app in applications %}"
-            "{% if app.rating < -2 %}terrible"
-            "{% elif app.rating < 0 %}poor"
-            "{% elif app.rating == 0 %}neutral"
-            "{% elif app.rating < 3 %}good"
-            "{% else %}excellent{% endif %}"
-            "{% endfor %}"
-        ),
-    ),
-    (
-        "WITH NESTED (4 levels)",
-        (
-            "{% for app in applications %}"
-            "{% with n=app.candidate.name %}"
-            "{% with s=app.stage.name %}"
-            "{% with st=app.status %}"
-            "{% with c=app.posting.company.name %}"
-            "{{ n }}|{{ s }}|{{ st }}|{{ c }}"
-            "{% endwith %}{% endwith %}{% endwith %}{% endwith %}"
-            "{% endfor %}"
-        ),
-    ),
-    # Forloop state.
-    (
-        "FORLOOP COUNTER (counter+first+last)",
-        (
-            "{% for app in applications %}"
-            "{{ forloop.counter }}:{{ app.candidate.name }}"
-            "{% if forloop.first %}[first]{% endif %}"
-            "{% if forloop.last %}[last]{% endif %}"
-            "{% endfor %}"
-        ),
-    ),
-    (
-        "CYCLE TAG (3 classes)",
-        (
-            "{% for app in applications %}"
-            '<tr class="{% cycle \'odd\' \'even\' \'other\' %}">'
-            "{{ app.candidate.name }}</tr>"
-            "{% endfor %}"
-        ),
-    ),
-    # Auto-escape.
-    (
-        "AUTOESCAPE HEAVY (HTML metachars)",
-        (
-            "{% for app in applications %}"
-            "<div>{{ app.html_blob }}</div>"
-            "{% endfor %}"
-        ),
-    ),
-    # Nested loops (parentloop, deeper context stack).
-    (
-        "NESTED LOOP (apps x tags)",
-        (
-            "{% for app in applications %}"
-            "{% for t in app.tags %}{{ forloop.counter }}:{{ t }};{% endfor %}"
-            "{% endfor %}"
-        ),
-    ),
-    # smartif boolean evaluator (and/or/not/in/comparison).
-    (
-        "IF BOOLEAN (and/or/not/in)",
-        (
-            "{% for app in applications %}"
-            "{% if app.rating > 0 and 'red' in app.tags and not app.is_archived %}Y"
-            "{% else %}N{% endif %}"
-            "{% endfor %}"
-        ),
-    ),
-    # i18n gettext path.
-    (
-        "I18N TRANSLATE (per row)",
-        (
-            "{% load i18n %}"
-            "{% for app in applications %}"
-            "{% translate 'Status' %}:{{ app.status }} "
-            "{% endfor %}"
-        ),
-    ),
-    # Long-text autoescape throughput (escape scan over prose).
-    (
-        "LONG TEXT AUTOESCAPE (prose)",
-        "{% for app in applications %}<p>{{ app.bio }}</p>{% endfor %}",
-    ),
-    # String filters over prose (truncatewords + linebreaks).
-    (
-        "PROSE FILTERS (truncatewords|linebreaksbr)",
-        (
-            "{% for app in applications %}"
-            "{{ app.bio|truncatewords:20|linebreaksbr }}"
-            "{% endfor %}"
-        ),
-    ),
-    # URL reverse.
-    (
-        "URL TAG (per row)",
-        (
-            "{% for app in applications %}"
-            "<a href=\"{% url 'detail' app.id %}\">{{ app.candidate.name }}</a>"
-            "{% endfor %}"
-        ),
-    ),
-    # CSRF token (cheap, but used everywhere).
-    (
-        "CSRF TOKEN (per row)",
-        (
-            "{% for app in applications %}"
-            "<form>{% csrf_token %}</form>"
-            "{% endfor %}"
-        ),
-    ),
-    # Empty arm of for.
-    (
-        "FOR EMPTY (empty list path)",
-        (
-            "{% for app in empty_apps %}"
-            "{{ app.candidate.name }}"
-            "{% empty %}NONE{% endfor %}"
-        ),
-    ),
-    # Spaceless.
-    (
-        "SPACELESS BLOCK",
-        (
-            "{% for app in applications %}"
-            "{% spaceless %}"
-            "<tr>  <td>  {{ app.candidate.name }}  </td>  </tr>"
-            "{% endspaceless %}"
-            "{% endfor %}"
-        ),
-    ),
-    # Custom Python tag/filter (FFI cost).
-    (
-        "CUSTOM PY FILTER (call per row)",
-        (
-            "{% load bench %}"
-            "{% for app in applications %}"
-            "{{ app.candidate.name|bench_noop }}"
-            "{% endfor %}"
-        ),
-    ),
-    (
-        "CUSTOM PY simple_tag (call per row)",
-        (
-            "{% load bench %}"
-            "{% for app in applications %}"
-            "{% bench_simple_tag app.candidate.name %}"
-            "{% endfor %}"
-        ),
-    ),
-    (
-        "CUSTOM PY @register.tag (per row)",
-        (
-            "{% load bench %}"
-            "{% for app in applications %}"
-            "{% bench_raw_tag app.candidate.name %}"
-            "{% endfor %}"
-        ),
-    ),
-    # regroup tag (consecutive grouping by attribute).
-    (
-        "REGROUP (by status)",
-        (
-            "{% regroup applications by status as grouped %}"
-            "{% for g in grouped %}{{ g.grouper }}("
-            "{% for a in g.list %}{{ a.id }},{% endfor %})"
-            "{% endfor %}"
-        ),
-    ),
-    # Filter with a variable (lookup) argument, not a constant.
-    (
-        "FILTER VAR ARG (default:var)",
-        (
-            "{% for app in applications %}"
-            "{{ app.posting.title|default:app.candidate.name }}"
-            "{% endfor %}"
-        ),
-    ),
-    # 3-level inheritance (grandchild -> child -> base) with block.super.
-    (
-        "INHERITANCE 3-LEVEL (block.super)",
-        "{% include 'bench_grandchild.html' %}",
-    ),
-    # Inheritance + include (loader-backed).
-    (
-        "INCLUDE LOOP (50 includes)",
-        (
-            "{% for app in applications %}"
-            "{% include 'bench_row.html' %}"
-            "{% endfor %}"
-        ),
-    ),
-    (
-        "INHERITANCE (extends+3 blocks)",
-        # Rendered template is bench_child.html (extends bench_base.html);
-        # the stub here just includes it so the same helper handles this
-        # case without special-casing the entrypoint.
-        "{% include 'bench_child.html' %}",
-    ),
-]
+def _run_command(command):
+    try:
+        return subprocess.run(
+            command, capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
 
 
-# Compile-time workloads. Three deterministic sizes; each backend
-# compiles `iterations` copies and reports mean per-compile time.
+def _machine():
+    if sys.platform == "darwin":
+        name = ""
+        for line in _run_command(
+            ["system_profiler", "SPHardwareDataType"]
+        ).splitlines():
+            if "Model Name" in line:
+                name = line.split(":", 1)[1].strip()
+        model = _run_command(["sysctl", "-n", "hw.model"])
+        chip = _run_command(["sysctl", "-n", "machdep.cpu.brand_string"])
+        memory = int(_run_command(["sysctl", "-n", "hw.memsize"]) or 0) // (1024**3)
+        system = f"macOS {platform.mac_ver()[0]}"
+        return f"{name} ({model})".strip(), chip, memory, system
+    chip = ""
+    memory = 0
+    if os.path.exists("/proc/cpuinfo"):
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                chip = line.split(":", 1)[1].strip()
+                break
+    if os.path.exists("/proc/meminfo"):
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal"):
+                memory = int(line.split()[1]) // (1024**2)
+    return platform.node(), chip or platform.processor(), memory, platform.platform()
 
 
-def _gen_template(num_rows: int) -> str:
-    """Synthesise a template with `num_rows` of the FULL TEMPLATE row
-    pattern (~12 AST nodes per row)."""
-    row = (
-        '<tr class="row {% if app.is_archived %}archived{% else %}active{% endif %}">'
-        "<td>{{ app.candidate.name }}</td>"
-        '<td>{{ app.posting.title|default:"-" }}</td>'
-        '<td>{{ app.posting.company.name|default:"-" }}</td>'
-        "<td>{{ app.stage.name }}</td>"
-        '<td>{{ app.created_at|date:"M d, Y" }}</td>'
-        '<td class="status-{{ app.status }}">{{ app.status|title }}</td>'
-        "</tr>"
+def _rusty_version():
+    version = importlib.metadata.version("django-rusty-templates")
+    try:
+        direct = json.loads(
+            importlib.metadata.distribution("django-rusty-templates").read_text(
+                "direct_url.json"
+            )
+            or "{}"
+        )
+        commit = direct.get("vcs_info", {}).get("commit_id", "")[:7]
+    except (OSError, ValueError):
+        commit = ""
+    return f"{version} ({commit})" if commit else version
+
+
+def _oxide_version():
+    version = importlib.metadata.version("django-template-oxide")
+    commit = _run_command(
+        ["git", "-C", str(setup_env.BENCH_DIR), "rev-parse", "--short", "HEAD"]
     )
-    return (
-        "<table><thead><tr><th>Name</th></tr></thead><tbody>"
-        + (row * num_rows)
-        + "</tbody></table>"
+    dirty = _run_command(
+        ["git", "-C", str(setup_env.BENCH_DIR), "status", "--porcelain"]
     )
+    if not commit:
+        return version
+    return f"{version} ({commit}{', uncommitted changes' if dirty else ''})"
 
 
-COMPILE_CASES = [
-    ("SMALL (10 rows ~120 nodes)", _gen_template(10)),
-    ("MEDIUM (100 rows ~1200 nodes)", _gen_template(100)),
-    ("LARGE (500 rows ~6000 nodes)", _gen_template(500)),
-]
-
-
-SCALING_ITEM_COUNTS = [1, 10, 100, 1000]
-
-
-def _backend_options():
-    """Shared {libraries, loaders, builtins} so per-case numbers reflect
-    the engine, not the configuration. Built fresh on each call so
-    callers (e.g. rusty) can strip incompatible OPTIONS keys."""
+def collect_meta(args):
+    machine, chip, memory, system = _machine()
+    free_threaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    gil = getattr(sys, "_is_gil_enabled", lambda: True)()
+    python = f"CPython {platform.python_version()}" + (
+        f", free-threaded (GIL {'on' if gil else 'off'})" if free_threaded else ""
+    )
+    oxide = _oxide_version()
+    cores = os.cpu_count()
+    describe = [
+        ("Machine", machine),
+        ("Chip", f"{chip}, {cores} cores" if chip else f"{cores} cores"),
+        ("Memory", f"{memory} GB" if memory else "unknown"),
+        ("OS", system),
+        ("Python", python),
+        ("Django", django.get_version()),
+        ("oxide", oxide),
+        ("rusty", _rusty_version()),
+        (
+            "Method",
+            (
+                f"Each time is the median of {args.repeats} samples of at least "
+                f"{args.target_ms:g} ms, alternating engines. A yellow ± marks a "
+                "result whose samples varied by 5% or more."
+            ),
+        ),
+        (
+            "Reading",
+            (
+                "The vs columns show how many times faster oxide is. Red means oxide "
+                "is slower, and same means the difference is within measurement noise."
+            ),
+        ),
+    ]
     return {
-        "DIRS": [],
-        "APP_DIRS": False,
-        "OPTIONS": {
-            "context_processors": _TEMPLATES_OPTIONS["context_processors"],
-            "builtins": list(_TEMPLATES_OPTIONS["builtins"]),
-            "libraries": dict(_TEMPLATES_OPTIONS["libraries"]),
-            "loaders": list(_TEMPLATES_OPTIONS["loaders"]),
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "machine": machine,
+        "python": python,
+        "oxide": oxide,
+        "settings": {
+            "items": args.items,
+            "repeats": args.repeats,
+            "target_ms": args.target_ms,
+            "sections": args.sections,
+        },
+        "describe": describe,
+    }
+
+
+def _timing_section(key, title, caption, rows):
+    return {
+        "key": key,
+        "kind": "timing",
+        "title": title,
+        "caption": caption,
+        "engines": list(setup_env.ENGINE_NAMES),
+        "rows": rows,
+    }
+
+
+def wanted(args, label):
+    return not args.only or any(text.lower() in label.lower() for text in args.only)
+
+
+def run_cases(cases_list, engines, args, progress):
+    rows = []
+    for case in cases_list:
+        if not wanted(args, case.label):
+            continue
+        progress.update(progress.task_ids[0], description=case.label)
+        callables = harness.case_renderers(engines, case)
+        rows.append(
+            {
+                "label": case.label,
+                "results": harness.measure(
+                    callables, args.repeats, args.target_ms / 1000
+                ),
+            }
+        )
+        if args.profile and callable(callables.get("oxide")):
+            rows[-1]["profile"] = profile_zones(callables["oxide"])
+    return rows
+
+
+def run_built(label, engines, build, args, progress, check_output=True):
+    if not wanted(args, label):
+        return None
+    progress.update(progress.task_ids[0], description=label)
+    callables = harness.checked_callables(engines, build, check_output)
+    return {
+        "label": label,
+        "results": harness.measure(callables, args.repeats, args.target_ms / 1000),
+    }
+
+
+def profile_zones(render, renders=500):
+    render()
+    reset_prof_stats()
+    for _ in range(renders):
+        render()
+    stats = dict(get_prof_stats())
+    return [
+        {
+            "zone": zone,
+            "calls_per_render": values["count"] / renders,
+            "ns_per_render": values["total_us"] * 1000 / renders,
+        }
+        for zone, values in sorted(
+            stats.items(), key=lambda item: -item[1]["total_us"]
+        )[:12]
+    ]
+
+
+def section_render(engines, args, progress, cases):
+    rows = run_cases(cases.render_cases(args.items), engines, args, progress)
+    return _timing_section(
+        "render",
+        "Template features",
+        f"Time to render one template over {args.items} rows of plain Python objects.",
+        rows,
+    )
+
+
+def section_django(engines, args, progress, cases):
+    rows = run_cases(cases.django_cases(args.items), engines, args, progress)
+    return _timing_section(
+        "django",
+        "Django objects",
+        f"Time to render {args.items} model instances, foreign keys, a QuerySet, lazy "
+        "translations, and a form. The QuerySet row includes its database query.",
+        rows,
+    )
+
+
+def section_pages(engines, args, progress, cases):
+    rows = run_cases(cases.page_cases(), engines, args, progress)
+    if wanted(args, "django-cotton page"):
+        progress.update(
+            progress.task_ids[0], description="django-cotton page (separate process)"
+        )
+        rows.append(_worker_result(["cotton"], args))
+    return _timing_section(
+        "pages",
+        "Whole pages",
+        "Time to render real pages through get_template and a request, including "
+        "inheritance, includes, and context processors.",
+        rows,
+    )
+
+
+def section_compile(engines, args, progress, cases):
+    rows = [
+        row
+        for label, src in cases.COMPILE_CASES
+        if (
+            row := run_built(
+                label,
+                engines,
+                lambda engine, src=src: lambda: engine.from_string(src),
+                args,
+                progress,
+                check_output=False,
+            )
+        )
+    ]
+    return _timing_section(
+        "compile",
+        "Compiling templates",
+        "Time to compile a template from source with from_string, with no caching.",
+        rows,
+    )
+
+
+def section_loading(engines, args, progress, cases):
+    uncached = setup_env.build_engines(cached=False)
+    context = {"applications": cases.build_applications(args.items)}
+
+    def build(engine):
+        return lambda: engine.get_template("bench_grandchild.html").render(context)
+
+    rows = [
+        row
+        for row in (
+            run_built("Cached loader (production)", engines, build, args, progress),
+            run_built(
+                "No cache (compiles every time)", uncached, build, args, progress
+            ),
+        )
+        if row
+    ]
+    return _timing_section(
+        "loading",
+        "Loading templates",
+        "Time for get_template plus render of a three-level template, the way views "
+        "load templates.",
+        rows,
+    )
+
+
+def section_scaling(engines, args, progress, cases):
+    rows = []
+    for count in cases.SCALING_ROWS:
+        context = {"applications": cases.build_applications(count)}
+        label = f"{count:,} row" + ("" if count == 1 else "s")
+
+        def build(engine, context=context):
+            template = engine.from_string(cases.FULL_TEMPLATE)
+            return lambda: template.render(context)
+
+        row = run_built(label, engines, build, args, progress)
+        if row:
+            rows.append(row)
+    return _timing_section(
+        "scaling",
+        "Scaling with data size",
+        "Time to render the full table template as the number of rows grows.",
+        rows,
+    )
+
+
+def section_context(engines, args, progress, cases):
+    apps = cases.build_applications(args.items)
+    narrow = {"applications": apps}
+    wide = {**{f"k{i}": i for i in range(200)}, "applications": apps}
+
+    def dict_build(context):
+        def build(engine):
+            template = engine.from_string(cases.FULL_TEMPLATE)
+            return lambda: template.render(context)
+
+        return build
+
+    def context_build(engine):
+        template = engine.from_string(cases.FULL_TEMPLATE).template
+        django_context = Context(narrow)
+        return lambda: template.render(django_context)
+
+    rows = [
+        row
+        for row in (
+            run_built("Plain dict", engines, dict_build(narrow), args, progress),
+            run_built(
+                "Django Context object (low-level API)",
+                engines,
+                context_build,
+                args,
+                progress,
+            ),
+            run_built(
+                "Dict with 200 extra keys", engines, dict_build(wide), args, progress
+            ),
+        )
+        if row
+    ]
+    return _timing_section(
+        "context",
+        "Passing the context",
+        f"Time to render the full table template ({args.items} rows) with different "
+        "kinds of context.",
+        rows,
+    )
+
+
+def section_threads(engines, args, progress, cases):
+    context = {"applications": cases.build_applications(args.items)}
+
+    def build(engine):
+        template = engine.from_string(cases.FULL_TEMPLATE)
+        return lambda: template.render(context)
+
+    callables = harness.checked_callables(engines, build)
+    duration = 0.2 if args.quick else 0.5
+    rows = []
+    for threads in cases.THREAD_COUNTS:
+        progress.update(progress.task_ids[0], description=f"{threads} thread(s)")
+        results = {}
+        for name, fn in callables.items():
+            if not callable(fn):
+                results[name] = fn
+                continue
+            try:
+                results[name] = harness.throughput(fn, threads, duration)
+            except Exception as error:
+                results[name] = harness.failure_from(error)
+        rows.append({"label": str(threads), "results": results})
+    gil = getattr(sys, "_is_gil_enabled", lambda: True)()
+    note = (
+        "With the GIL on, threads take turns, so throughput should stay flat."
+        if gil
+        else "With the GIL off, throughput should grow with the thread count."
+    )
+    return {
+        "key": "threads",
+        "kind": "throughput",
+        "title": "Rendering from several threads",
+        "caption": f"Renders per second of the full table template ({args.items} rows), "
+        f"all threads sharing one compiled template. {note}",
+        "engines": list(setup_env.ENGINE_NAMES),
+        "rows": rows,
+    }
+
+
+def section_memory(engines, args, progress, cases):
+    rows = {}
+    for name in setup_env.ENGINE_NAMES:
+        progress.update(
+            progress.task_ids[0], description=f"memory: {name} (separate process)"
+        )
+        rows[name] = _worker_json(["memory", "--engine", name], args)
+    return {
+        "key": "memory",
+        "kind": "memory",
+        "title": "Memory",
+        "caption": "Extra peak memory (resident set size) of a fresh process for each engine, "
+        "including memory allocated in Rust.",
+        "engines": list(setup_env.ENGINE_NAMES),
+        "rows": rows,
+    }
+
+
+def _worker_command(extra, args):
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "_worker",
+        *extra,
+        "--items",
+        str(args.items),
+        "--repeats",
+        str(args.repeats),
+        "--target-ms",
+        str(args.target_ms),
+    ]
+
+
+def _worker_json(extra, args):
+    completed = subprocess.run(
+        _worker_command(extra, args), check=False, capture_output=True, text=True
+    )
+    if completed.returncode != 0:
+        return {"error": "worker failed", "detail": completed.stderr[-300:]}
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def _worker_result(extra, args):
+    data = _worker_json(extra, args)
+    if "error" in data:
+        return {
+            "label": "django-cotton page",
+            "results": {
+                name: harness.Failure(data["error"], data.get("detail", ""))
+                for name in setup_env.ENGINE_NAMES
+            },
+        }
+    return {
+        "label": data["label"],
+        "results": {
+            name: harness.from_json(result) for name, result in data["results"].items()
         },
     }
 
 
-def _build_backends():
-    opts = _backend_options()
-    backends = {
-        "oxide": OxideTemplates({"NAME": "oxide", **opts}),
-        "stock": DjangoTemplates({"NAME": "stock", **opts}),
-    }
-    # rusty doesn't accept the `loaders` OPTIONS key; strip it.
-    rusty_opts = _backend_options()
-    rusty_opts["OPTIONS"].pop("loaders", None)
-    try:
-        backends["rusty"] = _RustyTemplates({"NAME": "rusty", **rusty_opts})
-    except Exception as e:  # pragma: no cover - rusty quirk
-        print(f"  (rusty backend init failed: {e!r}; skipping rusty column)")
-    return backends
+def _max_rss():
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return value if sys.platform == "darwin" else value * 1024
 
 
-def _percentile(values, pct):
-    """Return the `pct` (0-100) percentile of `values` (need not be sorted)."""
-    if not values:
-        return 0.0
-    s = sorted(values)
-    k = max(0, min(len(s) - 1, int(round((pct / 100.0) * (len(s) - 1)))))
-    return s[k]
+def worker(args):
+    if args.task == "cotton":
+        setup_env.configure(cotton=True)
+        import cases
 
-
-def _time_render(tpl_or_callable, ctx, n):
-    """Time `n` renders, returning (mean_ms, p99_ms).
-
-    Accepts a backend template object or a zero-arg callable that
-    performs one render."""
-    if callable(tpl_or_callable):
-        runner = tpl_or_callable
-    else:
-        runner = lambda: tpl_or_callable.render(ctx)  # noqa: E731
-    runner()  # warmup
-    timings = []
-    for _ in range(n):
-        t0 = time.perf_counter()
-        runner()
-        timings.append((time.perf_counter() - t0) * 1000)
-    mean = sum(timings) / len(timings)
-    return mean, _percentile(timings, 99)
-
-
-def _time_compile(backend, src, n):
-    """Time `n` cold compiles of `src` (full lex+parse per iteration)."""
-    backend.from_string(src)  # warmup
-    timings = []
-    for _ in range(n):
-        t0 = time.perf_counter()
-        backend.from_string(src)
-        timings.append((time.perf_counter() - t0) * 1000)
-    return sum(timings) / len(timings), _percentile(timings, 99)
-
-
-def _format_row(label, results, has_rusty):
-    """Build a single output row given a dict {backend: (mean, p99) | str}.
-
-    A string value is treated as an error marker (e.g. ``ERROR``) so the
-    table stays compact when a backend can't run a case."""
-    parts = [f"{label:36s}"]
-    for be in ("oxide", "rusty" if has_rusty else None, "stock"):
-        if be is None:
-            continue
-        cell = results.get(be)
-        if cell is None:
-            parts.append(f"{'-':>22s}")
-        elif isinstance(cell, str):
-            parts.append(f"{cell:>22s}")
-        else:
-            mean, p99 = cell
-            parts.append(f"{mean:>7.3f}ms (p99 {p99:>6.3f})")
-    if (
-        has_rusty
-        and isinstance(results.get("oxide"), tuple)
-        and isinstance(results.get("rusty"), tuple)
-    ):
-        ratio = results["oxide"][0] / results["rusty"][0] if results["rusty"][0] > 0 else 0
-        parts.append(f"{ratio:>5.2f}x")
-    return "  ".join(parts)
-
-
-def _print_header(title, has_rusty):
-    print()
-    print("=" * 100)
-    print(title)
-    print("=" * 100)
-    head = f"{'workload':36s}"
-    for be in ("oxide", "rusty" if has_rusty else None, "stock"):
-        if be is None:
-            continue
-        head += f"  {be:>22s}"
-    if has_rusty:
-        head += f"  {'ratio':>5s}"
-    print(head)
-    print("-" * len(head))
-
-
-def _error_marker(e: BaseException) -> str:
-    """Compact in-cell marker for a failed backend run."""
-    name = type(e).__name__
-    return {
-        "NotImplementedError": "ERROR: unsupported",
-        "TemplateDoesNotExist": "ERROR: no template",
-        "TemplateSyntaxError": "ERROR: syntax",
-        "InvalidTemplateLibrary": "ERROR: invalid lib",
-    }.get(name, f"ERROR: {name}")
-
-
-def section_render(backends, item_count, iterations):
-    apps = _build_applications(item_count)
-    ctx = {"applications": apps, "empty_apps": []}
-    has_rusty = "rusty" in backends
-    _print_header(
-        f"RENDER WORKLOADS  (items={item_count}, iters={iterations})", has_rusty
-    )
-    for label, src in RENDER_CASES:
-        results = {}
-        try:
-            reference = backends["stock"].from_string(src).render(dict(ctx))
-        except Exception:
-            reference = None
-        for be_name, be in backends.items():
-            try:
-                tpl = be.from_string(src)
-                if reference is not None and tpl.render(dict(ctx)) != reference:
-                    results[be_name] = "ERROR: wrong output"
-                    continue
-                results[be_name] = _time_render(tpl, ctx, iterations)
-            except Exception as e:  # pragma: no cover - bench best-effort
-                results[be_name] = _error_marker(e)
-        print(_format_row(label, results, has_rusty))
-
-
-def section_compile(backends, iterations):
-    has_rusty = "rusty" in backends
-    _print_header(f"COMPILE TIME  (iters={iterations})", has_rusty)
-    for label, src in COMPILE_CASES:
-        results = {}
-        for be_name, be in backends.items():
-            try:
-                results[be_name] = _time_compile(be, src, iterations)
-            except Exception as e:  # pragma: no cover
-                results[be_name] = _error_marker(e)
-        print(_format_row(label, results, has_rusty))
-
-
-def section_scaling(backends, iterations):
-    has_rusty = "rusty" in backends
-    _print_header(
-        f"SCALING SWEEP (FULL TEMPLATE)  (iters={iterations})", has_rusty
-    )
-    for n in SCALING_ITEM_COUNTS:
-        apps = _build_applications(n)
-        ctx = {"applications": apps}
-        results = {}
-        for be_name, be in backends.items():
-            try:
-                tpl = be.from_string(_FULL_TEMPLATE)
-                results[be_name] = _time_render(tpl, ctx, iterations)
-            except Exception as e:  # pragma: no cover
-                results[be_name] = _error_marker(e)
-        suffix = ""
-        if isinstance(results.get("oxide"), tuple):
-            suffix = f"  [oxide ns/item={results['oxide'][0] * 1e6 / n:.0f}]"
-        print(_format_row(f"items={n:6d}", results, has_rusty) + suffix)
-
-
-def section_context_entry(backends, item_count, iterations):
-    """Entry-path costs the dict fast path doesn't cover: rendering with a
-    Django ``Context`` object (oxide flattens it; stock renders natively)
-    via the low-level engine template, and a wide top-level context that
-    stresses the dict->context conversion."""
-    from django.template import Context as DjContext
-
-    has_rusty = "rusty" in backends
-    _print_header(f"CONTEXT ENTRY  (items={item_count}, iters={iterations})", has_rusty)
-
-    apps = _build_applications(item_count)
-    narrow = {"applications": apps}
-    wide = {**{f"k{i}": i for i in range(200)}, "applications": apps}
-
-    def _dict_runner(be, ctx):
-        tpl = be.from_string(_FULL_TEMPLATE)
-        return lambda: tpl.render(ctx)
-
-    def _ctx_runner(be, ctx):
-        low = be.from_string(_FULL_TEMPLATE).template
-        dj_ctx = DjContext(ctx)
-        return lambda: low.render(dj_ctx)
-
-    for label, factory, ctx in [
-        ("dict (fast path)", _dict_runner, narrow),
-        ("Context obj (low-level)", _ctx_runner, narrow),
-        ("wide dict (+200 keys)", _dict_runner, wide),
-    ]:
-        results = {}
-        for be_name, be in backends.items():
-            try:
-                results[be_name] = _time_render(factory(be, ctx), None, iterations)
-            except Exception as e:  # pragma: no cover - bench best-effort
-                results[be_name] = _error_marker(e)
-        print(_format_row(label, results, has_rusty))
-
-
-def section_prof(backends, ctx, iterations):
-    """If the FFI profiler is compiled in, print per-zone totals."""
-    print("\n--- oxide profile breakdown (FULL TEMPLATE) ---")
-    tpl = backends["oxide"].from_string(_FULL_TEMPLATE)
-    tpl.render(ctx)
-    reset_prof_stats()
-    for _ in range(iterations):
-        tpl.render(ctx)
-    stats = dict(get_prof_stats())
-    if stats:
-        items = sorted(stats.items(), key=lambda kv: -kv[1]["total_us"])
-        for k, s in items[:10]:
-            per_run_ms = s["total_us"] / iterations / 1000
-            print(
-                f"  {k:44s} count/run={s['count'] // iterations:>5d} "
-                f"per_run={per_run_ms:.3f}ms avg_ns={s['avg_ns']}"
-            )
-    else:
-        print(
-            "  (prof feature not enabled, rebuild with "
-            "`cargo build --features=prof`)"
+        engines = setup_env.build_engines(cotton=True)
+        case = cases.cotton_page_case(args.items)
+        results = harness.measure(
+            harness.case_renderers(engines, case), args.repeats, args.target_ms / 1000
         )
+        print(
+            json.dumps(
+                {
+                    "label": case.label,
+                    "results": {k: v.to_json() for k, v in results.items()},
+                }
+            )
+        )
+        return 0
+    setup_env.configure()
+    import cases
+
+    engine = setup_env.build_engines()[args.engine]
+    if isinstance(engine, Exception):
+        print(json.dumps({"error": "can't start", "detail": str(engine)[:300]}))
+        return 0
+    try:
+        small = engine.from_string(cases.FULL_TEMPLATE)
+        small.render({"applications": cases.build_applications(10)})
+        rows = {"applications": cases.build_applications(1000)}
+        start = _max_rss()
+        compiled = engine.from_string(cases.COMPILE_CASES[-1][1])
+        after_compile = _max_rss()
+        template = engine.from_string(cases.FULL_TEMPLATE)
+        for _ in range(20):
+            template.render(rows)
+        after_render = _max_rss()
+    except Exception as error:
+        failure = harness.failure_from(error)
+        print(json.dumps({"error": failure.reason, "detail": failure.detail}))
+        return 0
+    del compiled
+    print(
+        json.dumps(
+            {
+                "compile_mb": (after_compile - start) / MB,
+                "render_mb": (after_render - after_compile) / MB,
+            }
+        )
+    )
+    return 0
 
 
-def run(
-    item_count=50,
-    iterations=200,
-    sections=("render", "compile", "scaling", "context"),
-):
-    backends = _build_backends()
-    if "render" in sections:
-        section_render(backends, item_count, iterations)
-    if "compile" in sections:
-        # Compile cases are slower; cap iterations to keep bench under ~30s.
-        section_compile(backends, max(20, iterations // 5))
-    if "scaling" in sections:
-        section_scaling(backends, iterations)
-    if "context" in sections:
-        section_context_entry(backends, item_count, iterations)
-    apps = _build_applications(item_count)
-    section_prof(backends, {"applications": apps}, iterations)
+SECTION_RUNNERS = {
+    "render": section_render,
+    "django": section_django,
+    "pages": section_pages,
+    "compile": section_compile,
+    "loading": section_loading,
+    "scaling": section_scaling,
+    "context": section_context,
+    "threads": section_threads,
+    "memory": section_memory,
+}
+
+
+def _profiler_available(engines):
+    oxide = engines["oxide"]
+    if isinstance(oxide, Exception):
+        return False
+    reset_prof_stats()
+    oxide.from_string("{{ x }}").render({"x": 1})
+    return bool(get_prof_stats())
+
+
+def run(args):
+    setup_env.configure()
+    import cases
+
+    cases.seed_database(args.items)
+    console = report.make_console(args.no_color)
+    engines = setup_env.build_engines()
+    if args.profile and not _profiler_available(engines):
+        console.print(
+            "--profile needs oxide built with the profiler:\n"
+            "  VIRTUAL_ENV=.venv uvx maturin develop --release --features prof",
+            style="red",
+        )
+        return 2
+    meta = collect_meta(args)
+    console.print(report.header(meta))
+    sections = []
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("starting")
+        for key in args.sections:
+            section = SECTION_RUNNERS[key](engines, args, progress, cases)
+            sections.append(section)
+            report.print_section(progress.console, section)
+    summary = report.summarize(sections)
+    if summary is not None:
+        console.print(summary)
+    if args.json:
+        payload = {
+            "meta": meta,
+            "sections": [report.section_to_json(s) for s in sections],
+        }
+        Path(args.json).write_text(json.dumps(payload, indent=2))
+        console.print(f"Saved results to {args.json}", style="dim")
+    return 0
+
+
+def compare(args):
+    console = report.make_console(args.no_color)
+    old = json.loads(Path(args.before).read_text())
+    new = json.loads(Path(args.after).read_text())
+    regressions = report.compare(console, old, new, harness.from_json)
+    return 1 if regressions else 0
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="bench.py",
+        description="Compare oxide with django-rusty-templates and stock Django.",
+    )
+    commands = parser.add_subparsers(dest="command", metavar="{run,compare}")
+
+    run_parser = commands.add_parser("run", help="run the benchmarks (default)")
+    run_parser.add_argument(
+        "--sections",
+        default=",".join(SECTIONS),
+        help=f"comma-separated sections to run (default: all of {', '.join(SECTIONS)})",
+    )
+    run_parser.add_argument(
+        "--items", type=int, default=50, help="rows of data (default 50)"
+    )
+    run_parser.add_argument(
+        "--repeats", type=int, help="samples per result (default 9, quick 5)"
+    )
+    run_parser.add_argument(
+        "--target-ms",
+        type=float,
+        help="minimum sample length in ms (default 10, quick 3)",
+    )
+    run_parser.add_argument(
+        "--quick", action="store_true", help="fewer and shorter samples"
+    )
+    run_parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="only run workloads whose name contains TEXT (repeatable, case-insensitive)",
+    )
+    run_parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="show where oxide spends time in each workload (needs a build with --features prof)",
+    )
+    run_parser.add_argument("--json", help="also save results to this JSON file")
+    run_parser.add_argument("--no-color", action="store_true")
+
+    compare_parser = commands.add_parser(
+        "compare", help="compare oxide between two saved runs"
+    )
+    compare_parser.add_argument("before")
+    compare_parser.add_argument("after")
+    compare_parser.add_argument("--no-color", action="store_true")
+
+    worker_parser = commands.add_parser("_worker")
+    worker_parser.add_argument("task", choices=["cotton", "memory"])
+    worker_parser.add_argument("--engine", choices=setup_env.ENGINE_NAMES)
+    worker_parser.add_argument("--items", type=int, default=50)
+    worker_parser.add_argument("--repeats", type=int, default=9)
+    worker_parser.add_argument("--target-ms", type=float, default=10)
+
+    if not argv or argv[0] not in ("run", "compare", "_worker", "-h", "--help"):
+        argv = ["run", *argv]
+    args = parser.parse_args(argv)
+    if args.command == "run":
+        args.repeats = args.repeats or (5 if args.quick else 9)
+        args.target_ms = args.target_ms or (3.0 if args.quick else 10.0)
+        args.sections = [s.strip() for s in args.sections.split(",") if s.strip()]
+        unknown = [s for s in args.sections if s not in SECTIONS]
+        if unknown:
+            parser.error(f"unknown section(s): {', '.join(unknown)}")
+    return args
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.command == "compare":
+        return compare(args)
+    if args.command == "_worker":
+        return worker(args)
+    return run(args)
 
 
 if __name__ == "__main__":
-    n_items = int(os.environ.get("BENCH_ITEMS", "50"))
-    n_iters = int(os.environ.get("BENCH_ITERS", "200"))
-    sections_env = os.environ.get("BENCH_SECTIONS", "render,compile,scaling,context")
-    sections = tuple(s.strip() for s in sections_env.split(",") if s.strip())
-    run(item_count=n_items, iterations=n_iters, sections=sections)
+    sys.exit(main())

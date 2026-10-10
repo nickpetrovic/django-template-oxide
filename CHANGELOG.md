@@ -9,6 +9,19 @@ minor versions.
 
 ## Unreleased
 
+### Changed
+
+- Rewrote the benchmark. Each result is now the median of several
+  timed batches with the engines taking turns, every engine's output is
+  checked against stock Django, and the results print as tables with a
+  plain-language summary. New sections cover Django model objects and
+  QuerySets, whole pages (the Django admin and a django-cotton page),
+  `get_template` with and without the cached loader, renders per second
+  from several threads, and peak memory. `--json` saves a run and
+  `bench.py compare` reports regressions between two saved runs.
+- Updated the published benchmark numbers for both the regular and the
+  free-threaded CPython 3.14 builds.
+
 ## 0.1.0 (2026-10-09)
 
 First release.
